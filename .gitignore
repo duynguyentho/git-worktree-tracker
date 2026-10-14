@@ -1,0 +1,5 @@
+app/build/
+data/
+__pycache__/
+*.pyc
+.DS_Store
