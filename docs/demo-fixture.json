@@ -868,5 +868,67 @@
     "hue": 300
    }
   }
+ },
+ "worklog": {
+  "available": true,
+  "band": [
+   25200,
+   32400
+  ],
+  "target": 28800,
+  "at": 1791976129,
+  "day": {
+   "date": "2026-10-14",
+   "total_seconds": 24300,
+   "total": "6h 45m",
+   "state": "UNDER",
+   "entries": [
+    {
+     "id": "0",
+     "key": "ACME-412",
+     "summary": "",
+     "seconds": 10800,
+     "timeSpent": "3h",
+     "started": "2026-10-14T09:10:00+07:00",
+     "comment": "Proration for seat changes mid-cycle"
+    },
+    {
+     "id": "1",
+     "key": "ACME-418",
+     "summary": "",
+     "seconds": 5400,
+     "timeSpent": "1h 30m",
+     "started": "2026-10-14T12:40:00+07:00",
+     "comment": "Reproduce the double charge on redelivery"
+    },
+    {
+     "id": "2",
+     "key": "ACME-421",
+     "summary": "",
+     "seconds": 3600,
+     "timeSpent": "1h",
+     "started": "2026-10-14T14:20:00+07:00",
+     "comment": "Weekly digest template"
+    },
+    {
+     "id": "3",
+     "key": "ACME-399",
+     "summary": "",
+     "seconds": 1800,
+     "timeSpent": "30m",
+     "started": "2026-10-14T15:30:00+07:00",
+     "comment": "Address review comments"
+    },
+    {
+     "id": "4",
+     "key": "ACME-412",
+     "summary": "",
+     "seconds": 2700,
+     "timeSpent": "45m",
+     "started": "2026-10-14T16:10:00+07:00",
+     "comment": "Rebase onto develop, re-run tests"
+    }
+   ]
+  }
  }
 }

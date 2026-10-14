@@ -26,22 +26,25 @@ done
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+SOURCES=()
+while IFS= read -r f; do SOURCES+=("$f"); done < <(find "$HERE/Sources" -name '*.swift' | sort)
 
 if $RELEASE; then
   for arch in arm64 x86_64; do
     swiftc -O -parse-as-library -target "$arch-apple-macos14.0" \
-      -o "$BUILD/Worktrees-$arch" "$HERE/WorktreeBar.swift"
+      -o "$BUILD/Worktrees-$arch" "${SOURCES[@]}"
   done
   lipo -create -output "$APP/Contents/MacOS/Worktrees" "$BUILD/Worktrees-arm64" "$BUILD/Worktrees-x86_64"
   rm -f "$BUILD/Worktrees-arm64" "$BUILD/Worktrees-x86_64"
   DEV_SCRIPT=""
 else
   swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" \
-    -o "$APP/Contents/MacOS/Worktrees" "$HERE/WorktreeBar.swift"
+    -o "$APP/Contents/MacOS/Worktrees" "${SOURCES[@]}"
   DEV_SCRIPT="<key>WTScriptPath</key><string>$PROJECT/scripts/wt.py</string>"
 fi
 
 cp "$PROJECT/scripts/wt.py" "$APP/Contents/Resources/wt.py"
+rsync -a --exclude '__pycache__' "$PROJECT/scripts/wtlib/" "$APP/Contents/Resources/wtlib/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

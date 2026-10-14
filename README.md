@@ -41,6 +41,8 @@ It answers four questions:
 
 ### Start a ticket in one step
 
+![New worktree: repository, ticket, type, branch, base, destination folder](docs/screenshots/new-worktree.png)
+
 **+ New** (⌘N) creates a worktree for a ticket in a sibling `worktrees/` folder, on a new branch.
 The branch defaults to `feat/ABC-123` and you can edit it.
 
@@ -253,14 +255,44 @@ python3 scripts/wt.py config [--workspace NAME] [--set-bases DIR...] [--rename N
 
 ## Project layout
 
-| Path | What |
-|------|------|
-| `app/WorktreeBar.swift` | The SwiftUI app: main window, menu bar extra, `libproc` sampler |
-| `app/build.sh` | Builds `Worktrees.app` with `swiftc`. `--release` builds a universal, self-contained zip |
-| `install.sh` | One-line installer from the latest GitHub release |
-| `.github/workflows/release.yml` | Pushing a `v*` tag builds the universal app and publishes it to GitHub Releases |
-| `scripts/wt.py` | Backend and CLI. Every read and every removal goes through it |
-| `docs/demo-fixture.json` | Anonymised demo data used for the screenshots |
+```
+app/
+  build.sh                  swiftc build; --release = universal, self-contained zip
+  Sources/
+    App/                    @main app, AppDelegate (window chrome), snapshot mode
+    Models/                 Decodable shapes of `wt.py` output (Payload, Worktree, …)
+    Store/Store.swift       app state: loading, polling, actions, notifications diffing
+    Services/               Shell + alerts, libproc process sampler, system sampler, notifier
+    Support/                formatting helpers, installed editors / Warp detection
+    Theme/                  OKLCH design tokens, fonts, state/repo/PR styles
+    Views/
+      MainView.swift        window layout: toolbar, list, detail panel, shortcuts
+      Sidebar/              navigation, workspace switcher, Running / Worklog / This Mac cards
+      List/                 worktree row + context menu
+      Detail/               single and multi-selection panels
+      Sheets/               welcome, clean up, new worktree
+      Components/           buttons, chips, tiles, sparklines, live charts
+scripts/
+  wt.py                     CLI entry point (the app runs it for every read and action)
+  wtlib/
+    config.py               workspaces + settings + paths
+    util.py                 subprocess / git / cache helpers
+    repos.py                repo discovery (normal, bare, via worktrees), worktree listing
+    gitstate.py             per-worktree git state
+    artifacts.py            git-ignored dependency/build folders, stack detection
+    processes.py            processes per worktree (cwd + descendants)
+    sessions.py             Claude Code sessions ↔ worktrees ↔ Warp panes
+    prs.py                  PRs via gh, CI/review status, commits behind base
+    runs.py                 /dev run state (companion project)
+    model.py                assembles each worktree's state, reasons and removal blockers
+    cleanup.py              safe removal, --force backups, parking folders, branch deletion
+    create.py               new worktree off a freshly fetched base
+    worklog.py              today's worklog (companion project)
+    cli.py                  argument parsing and commands
+install.sh                  one-line installer from the latest release
+.github/workflows/release.yml   tag v* → universal build → GitHub Release
+docs/                       demo fixture + screenshots
+```
 
 ### Regenerating the screenshots
 
@@ -273,6 +305,7 @@ $APP --snapshot docs/screenshots/overview.png --select fix-ACME-418 --delay 3
 $APP --snapshot docs/screenshots/live-resources.png --select feat-ACME-412 --procs-first --delay 3
 $APP --snapshot docs/screenshots/multi-select.png --select feat-ACME-381,fix-ACME-372,feat-ACME-358,chore-ACME-377 --delay 3
 $APP --snapshot docs/screenshots/cleanup.png --cleanup --delay 3
+$APP --snapshot docs/screenshots/new-worktree.png --new --delay 3
 ```
 
 Add `--light` for the light appearance.
