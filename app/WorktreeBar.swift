@@ -2,6 +2,7 @@ import AppKit
 import Charts
 import Darwin
 import SwiftUI
+import UserNotifications
 
 // MARK: - Model (shape of `scripts/wt.py list --json`)
 
@@ -13,6 +14,64 @@ struct Payload: Decodable {
     let config: AppConfig?
     let bases: [String]?
     let configured: Bool?
+    let workspaces: [WorkspaceInfo]?
+    let worklog: WorklogPayload?
+}
+
+struct WorklogPayload: Decodable {
+    let available: Bool
+    let band: [Int]?
+    let target: Int?
+    let day: WorklogDay?
+    let error: String?
+    let at: Int?
+}
+
+struct WorklogDay: Decodable {
+    let date: String
+    let total_seconds: Int
+    let total: String
+    let state: String
+    let entries: [WorklogEntry]
+}
+
+struct WorklogEntry: Decodable, Hashable {
+    let id: String?
+    let key: String
+    let summary: String?
+    let seconds: Int
+    let timeSpent: String
+    let started: String
+    let comment: String?
+}
+
+struct RepoInfo: Decodable, Hashable {
+    let name: String
+    let path: String
+    let kind: String
+    let workspace: String
+    let default_base: String
+    let bases: [String]
+}
+
+struct CreateResult: Decodable {
+    let ok: Bool
+    let path: String?
+    let branch: String?
+    let base: String?
+    let base_sha: String?
+    let error: String?
+    let steps: [String]?
+    let deps: [DepResult]?
+}
+
+struct DepResult: Decodable, Hashable { let dir: String; let cloned: Bool; let seconds: Double?; let reason: String? }
+
+struct WorkspaceInfo: Decodable, Hashable {
+    let name: String
+    let bases: [String]
+    let jira_url: String?
+    let configured: Bool
 }
 
 /// Local, uncommitted settings from ~/.config/git-worktree-tracker/config.json (passed through by wt.py).
@@ -50,6 +109,9 @@ struct Worktree: Decodable, Identifiable {
     let run: RunInfo?
     let artifacts: Artifacts
     let ecosystems: [String]?
+    let workspace: String?
+    let repo_kind: String?
+    let repo_path: String?
     var procs: [Proc]
     let pr_status: PRStatus?
     let base_sync: BaseSync?
@@ -469,13 +531,15 @@ struct Sparkline: View {
     let values: [Double]
     let color: Color
     var ceiling: Double? = nil
+    var stretch = false
 
     var body: some View {
         GeometryReader { g in
             let top = max(ceiling ?? (values.max() ?? 1), 0.0001)
+            let span = CGFloat(max((stretch ? values.count : Store.historyLength) - 1, 1))
+            let offset = stretch ? 0 : CGFloat(Store.historyLength - values.count)
             let pts = values.enumerated().map { i, v in
-                CGPoint(x: g.size.width * CGFloat(i) / CGFloat(max(Store.historyLength - 1, 1))
-                           + g.size.width * CGFloat(Store.historyLength - values.count) / CGFloat(max(Store.historyLength - 1, 1)),
+                CGPoint(x: g.size.width * (CGFloat(i) + offset) / span,
                         y: g.size.height * (1 - CGFloat(min(v / top, 1))))
             }
             ZStack {
@@ -555,6 +619,132 @@ struct LiveDot: View {
     }
 }
 
+// MARK: - System sampler (host-wide CPU, memory, network — the numbers Activity Monitor shows)
+
+struct SystemSample { let t: Date; let cpu: Double; let memGB: Double; let rxBps: Double; let txBps: Double }
+
+final class SystemSampler {
+    let totalMemGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+    private var prevTicks: (busy: UInt64, total: UInt64)?
+    private var prevNet: [String: (rx: UInt32, tx: UInt32)] = [:]
+    private var prevNetAt: Date?
+
+    func sample() -> SystemSample {
+        let now = Date()
+        let net = network(now, commit: true)
+        return SystemSample(t: now, cpu: cpu(), memGB: memory(), rxBps: net.0, txBps: net.1)
+    }
+
+    /// % of the whole machine (100 = every core busy), from HOST_CPU_LOAD_INFO tick deltas.
+    private func cpu() -> Double {
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count) }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        let t = info.cpu_ticks
+        let busy = UInt64(t.0) + UInt64(t.1) + UInt64(t.3)
+        let total = busy + UInt64(t.2)
+        defer { prevTicks = (busy, total) }
+        guard let p = prevTicks, total > p.total else { return 0 }
+        return Double(busy - p.busy) / Double(total - p.total) * 100
+    }
+
+    /// "Memory Used" as in Activity Monitor: app memory + wired + compressed.
+    private func memory() -> Double {
+        var vm = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &vm) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count) }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        var page: vm_size_t = 0
+        host_page_size(mach_host_self(), &page)
+        let pages = UInt64(vm.internal_page_count) - UInt64(vm.purgeable_count) + UInt64(vm.wire_count) + UInt64(vm.compressor_page_count)
+        return Double(pages * UInt64(page)) / 1_073_741_824
+    }
+
+    private var lastRates: (Double, Double) = (0, 0)
+
+    /// Bytes/s in and out over every non-loopback interface (32-bit if_data counters, wrap-safe).
+    private func network(_ now: Date, commit: Bool = false) -> (Double, Double) {
+        guard commit else { return lastRates }
+        var ptr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ptr) == 0, let first = ptr else { return lastRates }
+        defer { freeifaddrs(ptr) }
+        var cur: [String: (rx: UInt32, tx: UInt32)] = [:]
+        for ifa in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let addr = ifa.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK),
+                  let data = ifa.pointee.ifa_data else { continue }
+            let name = String(cString: ifa.pointee.ifa_name)
+            if name.hasPrefix("lo") { continue }
+            let d = data.assumingMemoryBound(to: if_data.self).pointee
+            cur[name] = (d.ifi_ibytes, d.ifi_obytes)
+        }
+        defer { prevNet = cur; prevNetAt = now }
+        guard let at = prevNetAt else { return (0, 0) }
+        let dt = now.timeIntervalSince(at)
+        guard dt > 0.2 else { return lastRates }
+        var rx: UInt64 = 0, tx: UInt64 = 0
+        for (k, v) in cur {
+            if let p = prevNet[k] { rx += UInt64(v.rx &- p.rx); tx += UInt64(v.tx &- p.tx) }
+        }
+        lastRates = (Double(rx) / dt, Double(tx) / dt)
+        return lastRates
+    }
+}
+
+func rateText(_ bps: Double) -> String {
+    if bps >= 1_048_576 { return String(format: "%.1fM/s", bps / 1_048_576) }
+    if bps >= 1024 { return String(format: "%.0fK/s", bps / 1024) }
+    return String(format: "%.0fB/s", bps)
+}
+
+func durationText(_ seconds: Int) -> String {
+    let h = seconds / 3600, m = seconds % 3600 / 60
+    return h > 0 ? (m > 0 ? "\(h)h \(m)m" : "\(h)h") : "\(m)m"
+}
+
+// MARK: - Notifications
+
+/// macOS banners for PR transitions that need you; clicking one selects the worktree.
+final class Notifier: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = Notifier()
+    var onOpen: ((String) -> Void)?
+
+    func setup() {
+        let c = UNUserNotificationCenter.current()
+        c.delegate = self
+        c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    func post(title: String, body: String, path: String, id: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.userInfo = ["path": path]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        if let path = response.notification.request.content.userInfo["path"] as? String {
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                self.onOpen?(path)
+            }
+        }
+        done()
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner, .sound])
+    }
+}
+
 // MARK: - Store
 
 @MainActor
@@ -567,6 +757,12 @@ final class Store: ObservableObject {
     let script: String
     private var timer: Timer?
     private var procTimer: Timer?
+    private var worklogTimer: Timer?
+    private let systemSampler = SystemSampler()
+    @Published var system: [SystemSample] = []
+    @Published var worklog: WorklogPayload?
+    @Published var pendingSelect: String?
+    var notify: Bool { UserDefaults.standard.object(forKey: "notify") as? Bool ?? true }
     private var liveTimer: Timer?
     private var polling = false
     private let sampler = LiveSampler()
@@ -580,7 +776,15 @@ final class Store: ObservableObject {
         script = dev.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
             ?? Bundle.main.path(forResource: "wt", ofType: "py") ?? ""
         refresh(withSizes: true)
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        if Self.fixture == nil && Snapshot.path == nil {
+            Notifier.shared.setup()
+            Notifier.shared.onOpen = { [weak self] path in self?.pendingSelect = path }
+        }
+        refreshWorklog()
+        worklogTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshWorklog() }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh(withSizes: true) }
         }
         procTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -591,9 +795,23 @@ final class Store: ObservableObject {
         }
     }
 
+    var totalMemGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
+
     var running: [Worktree] { worktrees.filter { !$0.procs.isEmpty }.sorted { $0.rssKB > $1.rssKB } }
 
     /// Live RAM/CPU: `wt.py procs <paths>` (~0.3s) every 5s while the app is frontmost.
+    private func synthesiseSystem() {
+        let now = Date()
+        system = (0..<Self.historyLength).map { i in
+            let t = Double(i)
+            return SystemSample(t: now.addingTimeInterval(Double(i - Self.historyLength)),
+                                cpu: 28 + 14 * sin(t / 9) + 9 * sin(t / 2.7),
+                                memGB: 21.4 + 0.6 * sin(t / 30),
+                                rxBps: max(0, 900_000 + 700_000 * sin(t / 4) * sin(t / 13)),
+                                txBps: max(0, 120_000 + 90_000 * sin(t / 5)))
+        }
+    }
+
     private func synthesiseHistory() {
         guard history.isEmpty, let d = data else { return }
         let now = Date()
@@ -634,7 +852,12 @@ final class Store: ObservableObject {
     func sampleLive() {
         if Self.fixture != nil {
             synthesiseHistory()
+            if system.isEmpty { synthesiseSystem() }
             return
+        }
+        if visible {
+            system.append(systemSampler.sample())
+            if system.count > Self.historyLength { system.removeFirst(system.count - Self.historyLength) }
         }
         guard visible, var d = data, !d.worktrees.isEmpty else { return }
         let byRoot = sampler.sample(roots: d.worktrees.filter { !$0.missingPath }.map(\.path), enrich: enrich)
@@ -654,7 +877,24 @@ final class Store: ObservableObject {
         data = d
     }
 
-    var worktrees: [Worktree] { data?.worktrees ?? [] }
+    static let allWorkspaces = "__all__"
+    @Published var workspace: String = UserDefaults.standard.string(forKey: "workspace") ?? Store.allWorkspaces {
+        didSet { UserDefaults.standard.set(workspace, forKey: "workspace") }
+    }
+
+    var workspaces: [WorkspaceInfo] { data?.workspaces ?? [] }
+    var multiWorkspace: Bool { workspaces.count > 1 }
+    var currentWorkspace: WorkspaceInfo? { workspaces.first { $0.name == workspace } }
+    /// The workspace that "Change folders…" edits: the selected one, else the first.
+    var editableWorkspace: String { currentWorkspace?.name ?? workspaces.first?.name ?? "Default" }
+
+    /// Worktrees of the selected workspace ("All" = every workspace).
+    var worktrees: [Worktree] {
+        let all = data?.worktrees ?? []
+        guard currentWorkspace != nil else { return all }
+        return all.filter { $0.workspace == workspace }
+    }
+    var shownBases: [String] { currentWorkspace?.bases ?? workspaces.flatMap(\.bases) }
     var cleanupCandidates: [Worktree] {
         worktrees.filter { prunable.contains($0.state) || ["MERGED", "CLOSED"].contains($0.pr?.state ?? "") }
     }
@@ -694,12 +934,72 @@ final class Store: ObservableObject {
             return
         }
         do {
-            data = try JSONDecoder().decode(Payload.self, from: raw)
+            let next = try JSONDecoder().decode(Payload.self, from: raw)
+            if !args.contains("--offline") { notifyTransitions(next) }
+            data = next
             RepoStyle.config = data?.config?.repos ?? [:]
             error = nil
         } catch {
             self.error = "decode: \(error)"
         }
+    }
+
+    /// Compares each PR's state with the last one seen (persisted, so a restart never re-alerts)
+    /// and posts a banner when a PR newly needs you — or got merged.
+    private func notifyTransitions(_ next: Payload) {
+        let key = "prStates"
+        let first = UserDefaults.standard.dictionary(forKey: key) == nil
+        var seen = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+        for w in next.worktrees {
+            guard let pr = w.pr else { continue }
+            let state = pr.state == "MERGED" ? "MERGED" : (w.pr_status?.state ?? pr.state)
+            let id = "\(w.repo)#\(pr.number)"
+            let before = seen[id]
+            seen[id] = state
+            guard !first, notify, Snapshot.path == nil, Self.fixture == nil, let before, before != state else { continue }
+            let title: String
+            switch state {
+            case "CHECKS_FAILED": title = "Checks failed"
+            case "CONFLICTING": title = "Merge conflict"
+            case "CHANGES_REQUESTED": title = "Changes requested"
+            case "APPROVED": title = "Approved"
+            case "MERGED": title = "Merged"
+            default: continue
+            }
+            var body = "\(w.title) · PR #\(pr.number) — \(pr.title ?? w.branchLabel)"
+            if let failed = w.pr_status?.failed_checks, state == "CHECKS_FAILED", !failed.isEmpty {
+                body += "\nFailing: " + failed.joined(separator: ", ")
+            }
+            Notifier.shared.post(title: "\(title) — \(w.repo)", body: body, path: w.path, id: "\(id)-\(state)")
+        }
+        UserDefaults.standard.set(seen, forKey: key)
+    }
+
+    func refreshWorklog() {
+        if Self.fixture != nil {
+            worklog = data?.worklog
+            return
+        }
+        Task {
+            let (code, out, _) = await Shell.run("/usr/bin/python3", [script, "worklog"])
+            guard code == 0, let raw = out.data(using: .utf8),
+                  let w = try? JSONDecoder().decode(WorklogPayload.self, from: raw) else { return }
+            worklog = w
+        }
+    }
+
+    func loadRepos() async -> [RepoInfo] {
+        let (code, out, _) = await Shell.run("/usr/bin/python3", [script, "repos"])
+        guard code == 0, let raw = out.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([RepoInfo].self, from: raw)) ?? []
+    }
+
+    func createWorktree(repo: String, branch: String, base: String, cloneDeps: Bool) async -> CreateResult {
+        let args = [script, "create", repo, branch, "--base", base, "--json"] + (cloneDeps ? [] : ["--no-deps"])
+        let (_, out, err) = await Shell.run("/usr/bin/python3", args)
+        if let raw = out.data(using: .utf8), let r = try? JSONDecoder().decode(CreateResult.self, from: raw) { return r }
+        return CreateResult(ok: false, path: nil, branch: nil, base: nil, base_sha: nil,
+                            error: err.isEmpty ? out : err, steps: nil, deps: nil)
     }
 
     func action(_ label: String, _ args: [String], hiding paths: Set<String> = [], report: Bool = false) {
@@ -754,9 +1054,12 @@ final class Store: ObservableObject {
 
     func fetchBase(_ w: Worktree) { action("Fetching \(w.base_sync?.base ?? "base")…", ["fetch", w.path]) }
     func reveal(_ w: Worktree) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: w.path)]) }
-    var jiraURL: String? { data?.config?.jira_url.flatMap { $0.isEmpty ? nil : $0 } }
-    func openJira(_ key: String) {
-        guard let base = jiraURL else { return }
+    func jiraURL(for w: Worktree) -> String? {
+        let ws = workspaces.first { $0.name == w.workspace }
+        return (ws?.jira_url ?? data?.config?.jira_url).flatMap { $0.isEmpty ? nil : $0 }
+    }
+    func openJira(_ w: Worktree) {
+        guard let key = w.ticket, let base = jiraURL(for: w) else { return }
         Shell.open(["\(base.hasSuffix("/") ? String(base.dropLast()) : base)/browse/\(key)"])
     }
 
@@ -816,8 +1119,8 @@ final class Store: ObservableObject {
         }
     }
 
-    /// NSOpenPanel → `wt.py config --set-bases …` → rescan.
-    func chooseFolders() {
+    /// NSOpenPanel → `wt.py config --workspace W --set-bases …` → rescan.
+    func chooseFolders(for ws: String? = nil) {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "Folders that hold your git repos"
@@ -827,16 +1130,41 @@ final class Store: ObservableObject {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        panel.message = "Workspace “\(ws ?? editableWorkspace)”. " + panel.message
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        setBases(panel.urls.map(\.path))
+        setBases(panel.urls.map(\.path), workspace: ws ?? editableWorkspace)
     }
 
-    func setBases(_ paths: [String]) {
+    func setBases(_ paths: [String], workspace ws: String) {
+        configure(["--workspace", ws, "--set-bases"] + paths)
+    }
+
+    func newWorkspace() {
+        guard let name = Alerts.prompt("New workspace", "A name, e.g. Work or Personal. Then pick its folders.",
+                                       placeholder: "Personal") else { return }
+        chooseFolders(for: name)
+        workspace = name
+    }
+
+    func renameWorkspace(_ ws: String) {
+        guard let name = Alerts.prompt("Rename “\(ws)”", "", placeholder: ws), name != ws else { return }
+        if workspace == ws { workspace = name }
+        configure(["--workspace", ws, "--rename", name])
+    }
+
+    func removeWorkspace(_ ws: String) {
+        guard Alerts.confirm("Remove workspace “\(ws)”?",
+                             "Only the workspace is forgotten — no repo or worktree is touched.", button: "Remove") else { return }
+        if workspace == ws { workspace = Self.allWorkspaces }
+        configure(["--remove-workspace", ws])
+    }
+
+    private func configure(_ args: [String]) {
         busy = "Scanning…"
         Task {
-            let (code, _, err) = await Shell.run("/usr/bin/python3", [script, "config", "--set-bases"] + paths)
+            let (code, _, err) = await Shell.run("/usr/bin/python3", [script, "config"] + args)
             busy = nil
-            if code != 0 { Alerts.info("Could not save the folders", err) }
+            if code != 0 { Alerts.info("Could not save the workspace", err) }
             data = nil
             loading = false
             refresh(withSizes: true)
@@ -902,6 +1230,22 @@ enum Alerts {
         a.addButton(withTitle: button).hasDestructiveAction = true
         a.addButton(withTitle: "Cancel")
         return a.runModal() == .alertFirstButtonReturn
+    }
+
+    static func prompt(_ title: String, _ body: String, placeholder: String) -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = body
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = placeholder
+        a.accessoryView = field
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        guard a.runModal() == .alertFirstButtonReturn else { return nil }
+        let v = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
     }
 
     static func info(_ title: String, _ body: String) {
@@ -1075,6 +1419,11 @@ struct MainView: View {
     @State private var showSidebar = true
     @State private var showCleanup = false
     @State private var showWelcome = false
+    @State private var showNew = false
+    @AppStorage("notify") private var notifyOn = true
+    /// The detail panel only exists while something is selected, and can be closed even then.
+    @AppStorage("detailClosed") private var detailClosed = false
+    var showDetail: Bool { !selection.isEmpty && !detailClosed }
     @State private var welcomed = false
     @FocusState private var searchFocused: Bool
     @FocusState private var listFocused: Bool
@@ -1135,10 +1484,24 @@ struct MainView: View {
                 toolbar
                 HStack(alignment: .top, spacing: 8) {
                     listPanel.frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
-                    detailPanel.frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity).layoutPriority(1)
+                    if showDetail {
+                        detailPanel.frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity).layoutPriority(1)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
                 }
                 .padding(.leading, showSidebar ? 0 : 8)
                 .padding([.trailing, .bottom], 8)
+                .animation(.snappy, value: showDetail)
+                .overlay(alignment: .bottom) {
+                    if let err = store.error {
+                        Label(err, systemImage: "exclamationmark.triangle.fill")
+                            .font(F.ui(12)).lineLimit(3)
+                            .padding(10)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(T.dangerSoft))
+                            .foregroundStyle(T.danger)
+                            .padding()
+                    }
+                }
             }
         }
         .background(T.bg)
@@ -1147,6 +1510,24 @@ struct MainView: View {
         .foregroundStyle(T.fg)
         .sheet(isPresented: $showCleanup) { CleanupSheet().environmentObject(store) }
         .sheet(isPresented: $showWelcome) { WelcomeSheet().environmentObject(store) }
+        .sheet(isPresented: $showNew) {
+            NewWorktreeSheet(preferredRepo: selected.first?.repo_path).environmentObject(store)
+        }
+        .onChange(of: store.pendingSelect) {
+            guard let p = store.pendingSelect else { return }
+            if store.worktrees.contains(where: { $0.path == p }) {
+                selection = [p]
+                anchor = p
+                store.pendingSelect = nil
+            }
+        }
+        .onChange(of: store.data?.generated_at) {
+            if let p = store.pendingSelect, store.worktrees.contains(where: { $0.path == p }) {
+                selection = [p]
+                anchor = p
+                store.pendingSelect = nil
+            }
+        }
         .onAppear { DispatchQueue.main.async { listFocused = true } }
         .background(shortcuts)
         .onChange(of: store.data?.generated_at) {
@@ -1161,6 +1542,7 @@ struct MainView: View {
                 })
             }
             if Snapshot.cleanup { showCleanup = true }
+            if Snapshot.args.contains("--new") { showNew = true }
             if let g = Snapshot.group, let v = GroupBy(rawValue: g) { groupBy = v }
             Snapshot.schedule()
         }
@@ -1169,6 +1551,8 @@ struct MainView: View {
     var shortcuts: some View {
         ZStack {
             Button("") { searchFocused = true }.keyboardShortcut("k")
+            Button("") { showNew = true }.keyboardShortcut("n")
+            Button("") { withAnimation(.snappy) { detailClosed.toggle() } }.keyboardShortcut("d", modifiers: [.command, .option])
             Button("") { store.refresh(withSizes: true, force: true) }.keyboardShortcut("r")
             Button("") { selection = Set(flat.map(\.path)) }.keyboardShortcut("a").disabled(searchFocused)
             Button("") { store.remove(selected) }.keyboardShortcut(.delete, modifiers: .command).disabled(searchFocused)
@@ -1183,7 +1567,8 @@ struct MainView: View {
 
     var subtitle: String {
         guard let d = store.data else { return "Loading…" }
-        return (["\(d.totals.count) worktrees"]
+        _ = d
+        return (["\(store.worktrees.count) worktrees"]
             + [("active", "active"), ("review", "in review"), ("merged", "merged")]
                 .compactMap { store.count($0.0) > 0 ? "\(store.count($0.0)) \($0.1)" : nil })
             .joined(separator: " · ")
@@ -1211,8 +1596,25 @@ struct MainView: View {
                     Text(store.busy ?? "Refreshing…").font(F.ui(12)).foregroundStyle(T.muted)
                 }
             }
+            Button { showNew = true } label: {
+                Label("New", systemImage: "plus").labelStyle(GapLabel())
+            }
+            .buttonStyle(TButtonStyle(kind: .primary, height: 34))
+            .help("New worktree from a ticket ⌘N")
             SegmentedControl(value: $groupBy)
             editorMenu
+            Button { notifyOn.toggle() } label: {
+                Image(systemName: notifyOn ? "bell.fill" : "bell.slash").font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(TButtonStyle(height: 34, square: true))
+            .help(notifyOn ? "Notifications on: checks failed, conflict, changes requested, approved, merged" : "Notifications off")
+            Button { withAnimation(.snappy) { detailClosed.toggle() } } label: {
+                Image(systemName: "sidebar.right").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(showDetail ? T.accentText : T.fg)
+            }
+            .buttonStyle(TButtonStyle(height: 34, square: true))
+            .disabled(selection.isEmpty)
+            .help(showDetail ? "Hide details ⌥⌘D" : "Show details ⌥⌘D")
             Button { store.refresh(withSizes: true, force: true) } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold))
             }
@@ -1293,7 +1695,7 @@ struct MainView: View {
                     Image(systemName: "magnifyingglass").font(.system(size: 26)).foregroundStyle(T.faint)
                     Text(query.isEmpty ? "No worktrees found" : "No match for “\(query)”").font(F.ui(14, .semibold))
                     if query.isEmpty {
-                        Text("Scanning " + (store.data?.bases ?? []).map(tildePath).joined(separator: ", "))
+                        Text("Scanning " + store.shownBases.map(tildePath).joined(separator: ", "))
                             .font(F.ui(12)).foregroundStyle(T.muted).multilineTextAlignment(.center)
                         Button("Choose folders…") { store.chooseFolders() }.buttonStyle(TButtonStyle(height: 30))
                     }
@@ -1342,6 +1744,11 @@ struct MainView: View {
             move(press.key == .upArrow ? -1 : 1, extend: press.modifiers.contains(.shift))
             return .handled
         }
+        .onKeyPress(.escape) {
+            guard !selection.isEmpty else { return .ignored }
+            withAnimation(.snappy) { selection = [] }
+            return .handled
+        }
         .onKeyPress(.return) {
             selected.prefix(3).forEach(store.openEditor)
             return .handled
@@ -1362,6 +1769,7 @@ struct MainView: View {
                   let i = flat.firstIndex(where: { $0.path == a }), let j = flat.firstIndex(where: { $0.path == w.path }) {
             selection = Set(flat[min(i, j)...max(i, j)].map(\.path))
         } else {
+            if detailClosed { withAnimation(.snappy) { detailClosed = false } }
             selection = [w.path]
             anchor = w.path
         }
@@ -1386,26 +1794,18 @@ struct MainView: View {
                 DetailView(w: sel[0])
             } else if sel.count > 1 {
                 MultiSelectView(items: sel)
-            } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "arrow.triangle.branch").font(.system(size: 34, weight: .light)).foregroundStyle(T.faint)
-                    Text("No worktree selected").font(F.ui(16, .semibold))
-                    Text("Pick one to see its git, PR and /dev state.\n⌘-click or ⇧-click to select several · ⌫ removes")
-                        .font(F.ui(12.5)).foregroundStyle(T.muted).multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .panel()
-        .overlay(alignment: .bottom) {
-            if let err = store.error {
-                Label(err, systemImage: "exclamationmark.triangle.fill")
-                    .font(F.ui(12)).lineLimit(3)
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(T.dangerSoft))
-                    .foregroundStyle(T.danger)
-                    .padding()
+        .overlay(alignment: .topTrailing) {
+            Button { withAnimation(.snappy) { detailClosed = true } } label: {
+                Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(T.subtle)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(T.well))
             }
+            .buttonStyle(.plain)
+            .padding(12)
+            .help("Close the panel (Esc clears the selection, ⌥⌘D toggles)")
         }
     }
 }
@@ -1466,6 +1866,8 @@ struct SidebarView: View {
             .frame(height: 28)
             .padding(.horizontal, 6)
 
+            ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 18) {
             nav("Status") {
                 NavRow(icon: "square.stack.3d.up.fill", tint: T.accentText, label: "All worktrees",
                        count: store.worktrees.count, on: filter == .all) { filter = .all }
@@ -1488,13 +1890,16 @@ struct SidebarView: View {
                            on: filter == .repo(repo)) { filter = filter == .repo(repo) ? .all : .repo(repo) }
                 }
             }
-            nav("Folders") {
-                ForEach(store.data?.bases ?? [], id: \.self) { b in
+            nav(store.multiWorkspace ? "Workspace" : "Folders") {
+                if store.multiWorkspace || store.workspaces.first?.configured == true {
+                    WorkspaceSwitcher()
+                }
+                ForEach(store.shownBases, id: \.self) { b in
                     HStack(spacing: 10) {
                         Image(systemName: "folder").font(.system(size: 12, weight: .semibold)).foregroundStyle(T.muted).frame(width: 16)
                         Text(tildePath(b)).font(F.ui(12.5)).foregroundStyle(T.muted).lineLimit(1).truncationMode(.head)
                     }
-                    .padding(.horizontal, 10).frame(height: 26)
+                    .padding(.horizontal, 10).frame(height: 24)
                     .help(b)
                 }
                 Button { store.chooseFolders() } label: {
@@ -1503,9 +1908,14 @@ struct SidebarView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(T.accentText)
                 .padding(.horizontal, 10).frame(height: 26)
+                .help("Folders of “\(store.editableWorkspace)”")
             }
-            Spacer(minLength: 0)
+            }
+            }
+            .scrollIndicators(.never)
+            .frame(maxHeight: .infinity, alignment: .top)
             if !store.running.isEmpty { ResourcesCard { filter = .running } }
+            if store.worklog?.available == true { WorklogCard() }
             if store.data != nil { StorageCard(showCleanup: $showCleanup) }
         }
         .padding(EdgeInsets(top: 6, leading: 10, bottom: 10, trailing: 10))
@@ -1521,6 +1931,51 @@ struct SidebarView: View {
                 .padding(.horizontal, 10).padding(.bottom, 6)
             rows()
         }
+    }
+}
+
+struct WorkspaceSwitcher: View {
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        let all = store.data?.worktrees ?? []
+        Menu {
+            Button {
+                store.workspace = Store.allWorkspaces
+            } label: {
+                Label("All workspaces (\(all.count))", systemImage: store.currentWorkspace == nil ? "checkmark" : "square.stack.3d.up")
+            }
+            Divider()
+            ForEach(store.workspaces, id: \.name) { ws in
+                Button { store.workspace = ws.name } label: {
+                    let n = all.filter { $0.workspace == ws.name }.count
+                    Label("\(ws.name) (\(n))", systemImage: store.workspace == ws.name ? "checkmark" : "folder")
+                }
+            }
+            Divider()
+            Button("New workspace…") { store.newWorkspace() }
+            if let ws = store.currentWorkspace {
+                Button("Rename “\(ws.name)”…") { store.renameWorkspace(ws.name) }
+                if store.multiWorkspace {
+                    Button("Remove “\(ws.name)”…", role: .destructive) { store.removeWorkspace(ws.name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "square.stack.3d.up.fill").font(.system(size: 12, weight: .semibold)).foregroundStyle(T.accentText)
+                Text(store.currentWorkspace?.name ?? (store.multiWorkspace ? "All workspaces" : store.workspaces.first?.name ?? "Workspace"))
+                    .font(F.ui(13, .semibold)).foregroundStyle(T.fg).lineLimit(1)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10, weight: .bold)).foregroundStyle(T.subtle)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(T.navOn))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 }
 
@@ -1599,6 +2054,284 @@ struct ResourcesCard: View {
     }
 }
 
+struct WorklogSlice: Identifiable {
+    let id: String
+    let seconds: Int
+    let color: Color
+}
+
+struct WorklogCard: View {
+    @EnvironmentObject var store: Store
+    @State private var showEntries = false
+    static let hues: [Double] = [250, 150, 75, 300, 190, 25, 110, 330]
+
+    var body: some View {
+        let w = store.worklog
+        let day = w?.day
+        let total = day?.total_seconds ?? 0
+        let target = w?.target ?? 8 * 3600
+        let band = w?.band ?? [7 * 3600, 9 * 3600]
+        let byKey = Dictionary(grouping: day?.entries ?? [], by: \.key).map { ($0.key, $0.value.reduce(0) { $0 + $1.seconds }) }
+            .sorted { $0.1 > $1.1 }
+        var slices = byKey.enumerated().map { i, kv in
+            WorklogSlice(id: kv.0, seconds: kv.1, color: Color(nsColor: oklch(0.68, 0.14, Self.hues[i % Self.hues.count])))
+        }
+        if total < target { slices.append(WorklogSlice(id: "remaining", seconds: target - total, color: T.well)) }
+        let state = day?.state ?? "UNDER"
+        let tone: Color = state == "BALANCED" ? T.green : state == "OVER" ? T.danger : T.amber
+        let delta = total < band[0] ? "needs +\(durationText(band[0] - total)) to 7h"
+            : total > band[1] ? "over by \(durationText(total - band[1]))" : "in the 7–9h band"
+
+        return Button { showEntries = true } label: {
+            HStack(alignment: .center, spacing: 12) {
+                ZStack {
+                    Chart(slices) { sl in
+                        SectorMark(angle: .value("time", sl.seconds), innerRadius: .ratio(0.64), angularInset: 1.2)
+                            .foregroundStyle(sl.color)
+                            .cornerRadius(2)
+                    }
+                    .chartLegend(.hidden)
+                    VStack(spacing: 0) {
+                        Text(durationText(total)).font(F.ui(13, .bold)).monospacedDigit().foregroundStyle(tone)
+                        Text("of \(durationText(target))").font(F.ui(9.5)).foregroundStyle(T.subtle)
+                    }
+                }
+                .frame(width: 70, height: 70)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text("Worklog").font(F.ui(12, .semibold)).foregroundStyle(T.fg).fixedSize()
+                        Chip(text: state.lowercased(), tone: Tone(fg: tone, bg: tone.opacity(0.16)), radius: 6)
+                    }
+                    Text(delta).font(F.ui(11.5)).foregroundStyle(tone)
+                    ForEach(Array(slices.filter { $0.id != "remaining" }.prefix(2))) { sl in
+                        HStack(spacing: 6) {
+                            Circle().fill(sl.color).frame(width: 7, height: 7)
+                            Text(sl.id).font(F.ui(11.5)).foregroundStyle(T.muted)
+                            Spacer(minLength: 0)
+                            Text(durationText(sl.seconds)).font(F.ui(11.5)).monospacedDigit().foregroundStyle(T.muted)
+                        }
+                    }
+                    if byKey.count > 2 { Text("+ \(byKey.count - 2) more").font(F.ui(11)).foregroundStyle(T.subtle) }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(dyn(oklch(1, 0, 0, 0.7), oklch(0.16, 0.008, 250, 0.6))))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(T.hairSoft))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Today's Jira worklog against the 7–9h band — click for the entries")
+        .popover(isPresented: $showEntries, arrowEdge: .trailing) { WorklogPopover(slices: slices) }
+        .onChange(of: showEntries) { if showEntries { store.refreshWorklog() } }
+    }
+}
+
+struct WorklogPopover: View {
+    @EnvironmentObject var store: Store
+    let slices: [WorklogSlice]
+
+    var body: some View {
+        let day = store.worklog?.day
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Worklog · \(day?.date ?? "today")").font(F.ui(13, .semibold))
+                Spacer()
+                Text(day.map { "\($0.total) · \($0.state.lowercased())" } ?? "").font(F.ui(12)).foregroundStyle(T.muted)
+            }
+            .padding(14)
+            Rectangle().fill(T.hairSoft).frame(height: 1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach((day?.entries ?? []).sorted { $0.started < $1.started }, id: \.self) { e in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(String(e.started.dropFirst(11).prefix(5))).font(F.mono(11.5)).foregroundStyle(T.subtle)
+                            Circle().fill(slices.first { $0.id == e.key }?.color ?? T.muted).frame(width: 8, height: 8).padding(.top, 4)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(e.key).font(F.ui(12.5, .semibold))
+                                    Text(e.timeSpent).font(F.ui(12)).monospacedDigit().foregroundStyle(T.muted)
+                                }
+                                if let c = e.comment, !c.isEmpty {
+                                    Text(c).font(F.ui(11.5)).foregroundStyle(T.muted).lineLimit(2)
+                                }
+                            }
+                        }
+                    }
+                    if (day?.entries ?? []).isEmpty {
+                        Text(store.worklog?.error ?? "Nothing logged yet today.").font(F.ui(12)).foregroundStyle(T.muted)
+                    }
+                }
+                .padding(14)
+            }
+            .frame(maxHeight: 360)
+        }
+        .frame(width: 380)
+        .foregroundStyle(T.fg)
+        .background(T.sheet)
+    }
+}
+
+struct NewWorktreeSheet: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+    let preferredRepo: String?
+    @State private var repos: [RepoInfo] = []
+    @State private var repoPath = ""
+    @State private var ticket = ""
+    @State private var kind = "feat"
+    @State private var branch = ""
+    @State private var branchEdited = false
+    @State private var base = ""
+    @State private var cloneDeps = true
+    @State private var openAfter = true
+    @State private var running = false
+    @State private var result: CreateResult?
+
+    var repo: RepoInfo? { repos.first { $0.path == repoPath } }
+    var suggested: String {
+        let key = ticket.trimmingCharacters(in: .whitespaces)
+        return key.isEmpty ? "" : "\(kind)/\(key)"
+    }
+    var folder: String {
+        guard let r = repo else { return "" }
+        let parent = (r.path as NSString).deletingLastPathComponent
+        let safe = branch.replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
+        return tildePath("\(r.kind == "bare" ? (parent as NSString).deletingLastPathComponent : parent)/worktrees/\(r.name)-\(safe)")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "plus.rectangle.on.folder").font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(T.accentText)
+                    .frame(width: 44, height: 44)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(T.accentSoft))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("New worktree").font(F.ui(18, .bold))
+                    Text("A new branch off a freshly fetched base, in a sibling worktrees/ folder. If the base cannot be fetched, nothing is created.")
+                        .font(F.ui(12.5)).foregroundStyle(T.muted).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    label("Repository")
+                    Picker("", selection: $repoPath) {
+                        ForEach(repos, id: \.path) { r in
+                            let dup = repos.filter { $0.name == r.name }.count > 1
+                            let place = dup ? "  —  " + tildePath((r.path as NSString).deletingLastPathComponent) : ""
+                            Text((store.multiWorkspace ? "\(r.name)  ·  \(r.workspace)" : r.name) + place).tag(r.path)
+                        }
+                    }
+                    .labelsHidden()
+                }
+                GridRow {
+                    label("Ticket")
+                    TextField("ABC-123 (optional)", text: $ticket).textFieldStyle(.roundedBorder)
+                }
+                GridRow {
+                    label("Type")
+                    Picker("", selection: $kind) {
+                        ForEach(["feat", "fix", "chore"], id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 220)
+                }
+                GridRow {
+                    label("Branch")
+                    TextField("feat/ABC-123", text: Binding(get: { branch }, set: { branch = $0; branchEdited = true }))
+                        .textFieldStyle(.roundedBorder).font(F.mono(12.5))
+                }
+                GridRow {
+                    label("Base")
+                    HStack(spacing: 6) {
+                        TextField("develop", text: $base).textFieldStyle(.roundedBorder).font(F.mono(12.5))
+                        Menu {
+                            ForEach(repo?.bases ?? [], id: \.self) { b in Button(b) { base = b } }
+                        } label: { Image(systemName: "chevron.down") }
+                        .menuIndicator(.hidden).fixedSize()
+                    }
+                }
+                GridRow {
+                    label("Folder")
+                    Text(folder).font(F.mono(11.5)).foregroundStyle(T.muted).lineLimit(2).truncationMode(.head)
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Clone node_modules from the main checkout when the lockfile matches (APFS copy-on-write)", isOn: $cloneDeps)
+                Toggle("Open in \(Store.editor.label) when done", isOn: $openAfter)
+            }
+            .toggleStyle(.checkbox).font(F.ui(12.5))
+            if let r = result {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(r.steps ?? [], id: \.self) { st in
+                        Label(st, systemImage: "checkmark.circle.fill").foregroundStyle(T.green)
+                    }
+                    ForEach((r.deps ?? []).filter { !$0.cloned }, id: \.self) { d in
+                        Label("\(d.dir): \(d.reason ?? "not cloned")", systemImage: "exclamationmark.circle.fill").foregroundStyle(T.amber)
+                    }
+                    if let e = r.error { Label(e, systemImage: "xmark.octagon.fill").foregroundStyle(T.danger) }
+                }
+                .font(F.ui(12)).lineLimit(3)
+                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(T.section))
+            }
+            HStack {
+                if running {
+                    ProgressView().controlSize(.small)
+                    Text("Fetching origin/\(base) and creating…").font(F.ui(12)).foregroundStyle(T.muted)
+                }
+                Spacer()
+                Button(result?.ok == true ? "Done" : "Cancel") { dismiss() }
+                    .buttonStyle(TButtonStyle())
+                    .keyboardShortcut(.cancelAction)
+                if result?.ok != true {
+                    Button("Create worktree") { create() }
+                        .buttonStyle(TButtonStyle(kind: .primary))
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(running || repo == nil || branch.isEmpty || base.isEmpty)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 600)
+        .background(T.sheet)
+        .font(F.ui(13))
+        .foregroundStyle(T.fg)
+        .task {
+            // Most-used repos first: the one with the most worktrees is almost always the one you mean.
+            let uses = Dictionary(grouping: store.worktrees.compactMap(\.repo_path), by: { $0 }).mapValues(\.count)
+            repos = await store.loadRepos()
+                .filter { store.currentWorkspace == nil || $0.workspace == store.workspace }
+                .sorted { (uses[$0.path] ?? 0, $1.name) > (uses[$1.path] ?? 0, $0.name) }
+            repoPath = repos.first { $0.path == preferredRepo }?.path ?? repos.first?.path ?? ""
+            base = repo?.default_base ?? ""
+        }
+        .onChange(of: repoPath) { base = repo?.default_base ?? base }
+        .onChange(of: ticket) { if !branchEdited { branch = suggested } }
+        .onChange(of: kind) { if !branchEdited { branch = suggested } }
+    }
+
+    func label(_ t: String) -> some View {
+        Text(t).font(F.ui(12.5)).foregroundStyle(T.subtle).gridColumnAlignment(.trailing)
+    }
+
+    func create() {
+        guard let r = repo else { return }
+        running = true
+        result = nil
+        Task {
+            let res = await store.createWorktree(repo: r.path, branch: branch, base: base, cloneDeps: cloneDeps)
+            running = false
+            result = res
+            if res.ok, let path = res.path {
+                if openAfter { Shell.open(["-b", Store.editor.app, path]) }
+                store.pendingSelect = path
+                store.refresh(withSizes: true)
+            }
+        }
+    }
+}
+
 struct StorageCard: View {
     @EnvironmentObject var store: Store
     @Binding var showCleanup: Bool
@@ -1607,11 +2340,41 @@ struct StorageCard: View {
         let d = store.data!
         let total = max(d.disk.total_gb, 1)
         let used = total - d.disk.free_gb
-        let nm = d.totals.artifacts_gb
+        let nm = store.worktrees.reduce(0) { $0 + $1.gb }
         let reclaim = store.pruneCandidates.reduce(0) { $0 + $1.gb }
         let cands = store.cleanupCandidates.count
 
+        let sys = store.system
+        let last = sys.last
         VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("This Mac").font(F.ui(12, .semibold))
+                LiveDot(compact: true)
+                Spacer()
+            }
+            VStack(spacing: 7) {
+                sysRow("CPU", last.map { cpuText($0.cpu) } ?? "—", sys.map(\.cpu), T.accentText, ceiling: 100)
+                    .help("Whole machine: 100% = every core busy")
+                sysRow("Memory", last.map { String(format: "%.1f/%.0f GB", $0.memGB, store.totalMemGB) } ?? "—",
+                       sys.map(\.memGB), T.danger, ceiling: store.totalMemGB)
+                    .help("App memory + wired + compressed, as in Activity Monitor")
+                HStack(spacing: 8) {
+                    Text("Network").foregroundStyle(T.muted).frame(width: 54, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("↓ " + (last.map { rateText($0.rxBps) } ?? "—")).foregroundStyle(T.green)
+                        Text("↑ " + (last.map { rateText($0.txBps) } ?? "—")).foregroundStyle(T.blue)
+                    }
+                    .font(F.ui(11)).monospacedDigit().lineLimit(1).fixedSize()
+                    Spacer(minLength: 4)
+                    ZStack {
+                        Sparkline(values: sys.map(\.rxBps), color: T.green, ceiling: max(1, sys.map { max($0.rxBps, $0.txBps) }.max() ?? 1), stretch: true)
+                        Sparkline(values: sys.map(\.txBps), color: T.blue, ceiling: max(1, sys.map { max($0.rxBps, $0.txBps) }.max() ?? 1), stretch: true)
+                    }
+                    .frame(height: 18).frame(minWidth: 30)
+                }
+                .font(F.ui(12))
+            }
+            Rectangle().fill(T.hairSoft).frame(height: 1)
             HStack(alignment: .firstTextBaseline) {
                 Text("Disk").font(F.ui(12, .semibold))
                 Spacer()
@@ -1646,6 +2409,16 @@ struct StorageCard: View {
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(T.hairSoft))
     }
 
+    func sysRow(_ k: String, _ v: String, _ values: [Double], _ c: Color, ceiling: Double) -> some View {
+        HStack(spacing: 8) {
+            Text(k).foregroundStyle(T.muted).frame(width: 54, alignment: .leading)
+            Text(v).monospacedDigit().foregroundStyle(T.fg).lineLimit(1).fixedSize()
+            Spacer(minLength: 4)
+            Sparkline(values: values, color: c, ceiling: ceiling, stretch: true).frame(height: 18).frame(minWidth: 30)
+        }
+        .font(F.ui(12))
+    }
+
     func legend(_ c: Color, _ k: String, _ v: String, _ emphasized: Color) -> some View {
         HStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 2).fill(c).frame(width: 8, height: 8)
@@ -1675,6 +2448,9 @@ struct RowView: View {
                     Text(w.title).font(F.ui(14, .semibold)).tracking(-0.14).lineLimit(1).fixedSize()
                     let rs = RepoStyle.of(w.repo)
                     Chip(text: rs.short, tone: rs.tone, radius: 6).fixedSize()
+                    if store.multiWorkspace, store.currentWorkspace == nil, let ws = w.workspace {
+                        Chip(text: ws, tone: Tone(fg: T.muted, bg: T.well), radius: 6).fixedSize()
+                    }
                     Spacer(minLength: 4)
                     if let b = w.base_sync, b.behind > 0 {
                         Chip(text: "↓\(b.behind)", tone: Tone(fg: T.amber, bg: T.amberSoft), radius: 6).fixedSize()
@@ -1771,7 +2547,7 @@ struct WorktreeMenu: View {
         Button("Reveal in Finder") { store.reveal(w) }
         Divider()
         if let pr = w.pr { Button("Open PR #" + String(pr.number)) { Shell.open([pr.url]) } }
-        if let t = w.ticket, store.jiraURL != nil { Button("Open \(t) in Jira") { store.openJira(t) } }
+        if let t = w.ticket, store.jiraURL(for: w) != nil { Button("Open \(t) in Jira") { store.openJira(w) } }
         Button("Copy path") { copyToPasteboard(w.path) }
         if let b = w.branch { Button("Copy branch") { copyToPasteboard(b) } }
         Divider()
@@ -1828,6 +2604,8 @@ struct DetailView: View {
                     let st = StateStyle.of(w.state)
                     Chip(text: st.title, tone: st.tone)
                     ForEach(w.ecosystems ?? [], id: \.self) { Chip(text: $0, tone: Tone(fg: T.muted, bg: T.well)) }
+                    if w.repo_kind == "bare" { Chip(text: "bare repo", tone: Tone(fg: T.muted, bg: T.well)) }
+                    if store.multiWorkspace, let ws = w.workspace { Chip(text: ws, tone: Tone(fg: T.muted, bg: T.well)) }
                     if let pr = w.pr {
                         let (label, tone) = w.pr_status.map { let t = prStatusTone($0); return (t.0, t.1) } ?? prTone(pr)
                         Chip(text: "#\(String(pr.number)) · \(label)", tone: tone)
@@ -1857,8 +2635,8 @@ struct DetailView: View {
                   ?? "No Warp pane is on this worktree — opens a new tab there")
             Button { store.reveal(w) } label: { Label("Finder", systemImage: "folder") }
                 .buttonStyle(TButtonStyle())
-            if let t = w.ticket, store.jiraURL != nil {
-                Button { store.openJira(t) } label: { Label("Jira", systemImage: "arrow.up.forward.square") }
+            if w.ticket != nil, store.jiraURL(for: w) != nil {
+                Button { store.openJira(w) } label: { Label("Jira", systemImage: "arrow.up.forward.square") }
                     .buttonStyle(TButtonStyle())
             }
             Spacer(minLength: 0)
@@ -2348,7 +3126,7 @@ struct WelcomeSheet: View {
             HStack(spacing: 10) {
                 Spacer()
                 if !bases.isEmpty {
-                    Button("Use these") { store.setBases(bases); dismiss() }
+                    Button("Use these") { store.setBases(bases, workspace: store.editableWorkspace); dismiss() }
                         .buttonStyle(TButtonStyle())
                 }
                 Button { dismiss(); DispatchQueue.main.async { store.chooseFolders() } } label: {

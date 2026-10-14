@@ -39,29 +39,54 @@ def load_config():
 
 
 CONFIG = load_config()
-# Folders scanned for repos. Unconfigured → whichever common code folders exist (never ~/Documents,
-# which would trigger a macOS privacy prompt before the user picked anything).
+# A workspace = a named set of folders plus its own Jira URL, ticket pattern, repo labels and
+# companion project. Legacy flat configs (top-level "bases"/"base") read as one workspace.
+# Unconfigured → whichever common code folders exist (never ~/Documents, which would trigger a
+# macOS privacy prompt before the user picked anything).
 DEFAULT_CANDIDATES = ["~/Projects", "~/Developer", "~/code", "~/Code", "~/src", "~/dev", "~/work",
                       "~/repos", "~/git", "~/GitHub", "~/workspace"]
-_configured = os.environ.get("WT_BASE") or CONFIG.get("bases") or CONFIG.get("base")
-CONFIGURED = bool(_configured)
-if os.environ.get("WT_BASE"):
-    BASES = [os.environ["WT_BASE"]]
-elif CONFIG.get("bases"):
-    BASES = list(CONFIG["bases"])
-elif CONFIG.get("base"):
-    BASES = [CONFIG["base"]]
-else:
-    BASES = [c for c in DEFAULT_CANDIDATES if Path(c).expanduser().is_dir()]
-BASES = list(dict.fromkeys(str(Path(b).expanduser()) for b in BASES))
-SCAN_DEPTH = int(CONFIG.get("scan_depth", 3))
-SCAN_SKIP = {"node_modules", "vendor", "worktrees", "Library", "Applications", ".Trash", "target", "dist", "build"}
+WORKSPACE_KEYS = ("name", "bases", "base", "jira_url", "ticket_regex", "repos", "assistant", "scan_depth")
+DEFAULT_TICKET_RE = r"\b[A-Z][A-Z0-9]+-\d+\b"
+
+
+def _norm_workspace(ws, configured):
+    bases = ws.get("bases") or ([ws["base"]] if ws.get("base") else [])
+    assistant = os.environ.get("WT_ASSISTANT") or ws.get("assistant")
+    assistant = Path(assistant).expanduser() if assistant else None
+    return {
+        "name": ws.get("name") or "Default",
+        "bases": list(dict.fromkeys(str(Path(b).expanduser()) for b in bases)),
+        "jira_url": ws.get("jira_url"),
+        "ticket_re": re.compile(ws.get("ticket_regex") or DEFAULT_TICKET_RE),
+        "repos": ws.get("repos") or {},
+        "assistant": assistant,
+        "dev_runs": os.environ.get("WT_DEV_RUNS") or (assistant and assistant / ".claude" / "memory" / "dev-runs.json"),
+        "scan_depth": int(ws.get("scan_depth") or CONFIG.get("scan_depth") or 3),
+        "configured": configured,
+    }
+
+
+def load_workspaces(cfg):
+    if os.environ.get("WT_BASE"):
+        flat = {k: cfg[k] for k in WORKSPACE_KEYS if k in cfg}
+        return [_norm_workspace(dict(flat, bases=[os.environ["WT_BASE"]]), True)]
+    if cfg.get("workspaces"):
+        return [_norm_workspace(w, True) for w in cfg["workspaces"]]
+    flat = {k: cfg[k] for k in WORKSPACE_KEYS if k in cfg}
+    if flat.get("bases") or flat.get("base"):
+        return [_norm_workspace(flat, True)]
+    found = [c for c in DEFAULT_CANDIDATES if Path(c).expanduser().is_dir()]
+    return [_norm_workspace(dict(flat, bases=found), False)]
+
+
+WORKSPACES = load_workspaces(CONFIG)
+CONFIGURED = any(w["configured"] for w in WORKSPACES)
+BASES = list(dict.fromkeys(b for w in WORKSPACES for b in w["bases"]))
+SCAN_SKIP = {"node_modules", "vendor", "Library", "Applications", ".Trash", "target", "dist", "build"}
 STATE_HOME = Path("~/Library/Application Support/git-worktree-tracker").expanduser()
 CACHE_PATH = Path(os.environ.get("WT_CACHE_PATH") or "~/Library/Caches/git-worktree-tracker/wt_cache.json").expanduser()
-ASSISTANT = os.environ.get("WT_ASSISTANT") or CONFIG.get("assistant")
-ASSISTANT = Path(ASSISTANT).expanduser() if ASSISTANT else None
-DEV_RUNS = os.environ.get("WT_DEV_RUNS") or (ASSISTANT and ASSISTANT / ".claude" / "memory" / "dev-runs.json")
-PR_WATCH_DIR = os.environ.get("WT_PR_WATCH_DIR") or (ASSISTANT and str(ASSISTANT / "scripts"))
+PR_WATCH_DIR = os.environ.get("WT_PR_WATCH_DIR") or next(
+    (str(w["assistant"] / "scripts") for w in WORKSPACES if w["assistant"]), None)
 GH = os.environ.get("GH_BIN") or shutil.which("gh") or "/opt/homebrew/bin/gh"
 
 PR_TTL = 10 * 60
@@ -70,7 +95,6 @@ UNTRACKED_TTL = 60
 ACTIVE_DAYS = 2
 STALE_DAYS = 14
 FORCE_MIN_IDLE_H = 24
-TICKET_RE = re.compile(CONFIG.get("ticket_regex") or r"\b[A-Z][A-Z0-9]+-\d+\b")
 EDITORS = {
     "webstorm": "WebStorm",
     "code": "Visual Studio Code",
@@ -108,31 +132,96 @@ def save_cache(cache):
 
 # ---------------------------------------------------------------- discovery
 
-def main_repos():
-    """Main checkouts (a `.git` DIRECTORY — linked worktrees have a `.git` file) under every
-    configured folder, up to SCAN_DEPTH levels deep. A repo's own subfolders are not searched."""
-    found = []
+class Repo:
+    """A repository found on disk. `path` is what git commands run against: the checkout of a
+    normal repo, or the git dir itself for a bare one."""
 
-    def walk(d, depth):
+    def __init__(self, path, kind, workspace):
+        self.path, self.kind, self.workspace = Path(path), kind, workspace
+        n = self.path.name
+        if kind == "bare":
+            n = self.path.parent.name if n in (".bare", ".git") else (n[:-4] if n.endswith(".git") else n)
+        self.name = n
+
+    def __str__(self):
+        return str(self.path)
+
+
+def _common_dir_of_gitfile(d):
+    """`.git` FILE (a linked worktree, or the `.bare` layout's main folder) → the shared git dir."""
+    try:
+        line = (d / ".git").read_text().strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    gitdir = Path(line[7:].strip())
+    gitdir = (d / gitdir).resolve() if not gitdir.is_absolute() else gitdir.resolve()
+    try:
+        return (gitdir / (gitdir / "commondir").read_text().strip()).resolve()
+    except OSError:
+        return gitdir
+
+
+def _repo_from_common(common, workspace):
+    common = Path(common)
+    if common.name == ".git" and (common.parent / ".git").is_dir():
+        return Repo(common.parent, "normal", workspace)
+    if (common / "HEAD").is_file() and (common / "objects").is_dir():
+        return Repo(common, "bare", workspace)
+    return None
+
+
+def _looks_bare(d):
+    return (d / "HEAD").is_file() and (d / "objects").is_dir() and (d / "refs").is_dir() and not (d / ".git").exists()
+
+
+def main_repos():
+    """Every repo under every workspace's folders, up to its scan depth:
+    - a normal checkout (`.git` directory),
+    - a bare repo (`repo.git/`, `.bare/` …), the usual home of worktree-heavy setups,
+    - and, through any linked worktree met on the way (`.git` file), the repo it belongs to —
+      even when that repo lives outside the configured folders.
+    A repo's own subfolders are not searched."""
+    found = {}
+
+    def add(repo):
+        if repo:
+            found.setdefault(os.path.realpath(repo.path), repo)
+
+    def inspect(d, ws):
+        """True when `d` is a repo or a worktree (stop descending)."""
+        g = d / ".git"
+        if g.is_dir():
+            add(Repo(d, "normal", ws["name"]))
+            return True
+        if g.is_file():
+            common = _common_dir_of_gitfile(d)
+            if common:
+                add(_repo_from_common(common, ws["name"]))
+            return True
+        if _looks_bare(d):
+            add(Repo(d, "bare", ws["name"]))
+            return True
+        return False
+
+    def walk(d, depth, ws):
         try:
             entries = sorted(e for e in d.iterdir() if e.is_dir() and not e.is_symlink())
         except OSError:
             return
         for e in entries:
-            if e.name.startswith(".") or e.name in SCAN_SKIP:
+            if e.name in SCAN_SKIP or (e.name.startswith(".") and e.name != ".bare"):
                 continue
-            if (e / ".git").is_dir():
-                found.append(e)
-            elif depth > 1:
-                walk(e, depth - 1)
+            if not inspect(e, ws) and depth > 1:
+                walk(e, depth - 1, ws)
 
-    for base in BASES:
-        b = Path(base)
-        if (b / ".git").is_dir():
-            found.append(b)
-        elif b.is_dir():
-            walk(b, SCAN_DEPTH)
-    return list(dict.fromkeys(found))
+    for ws in WORKSPACES:
+        for base in ws["bases"]:
+            b = Path(base)
+            if b.is_dir() and not inspect(b, ws):
+                walk(b, ws["scan_depth"], ws)
+    return list(found.values())
 
 
 def repo_slug(repo):
@@ -152,7 +241,8 @@ def list_worktrees(repo):
             continue
         key, _, val = line.partition(" ")
         cur[key] = val or True
-    return items[1:]  # first entry is the main checkout
+    main = os.path.realpath(str(repo))
+    return [i for i in items if not i.get("bare") and os.path.realpath(i.get("worktree", "")) != main]
 
 
 # ---------------------------------------------------------------- per-source data
@@ -326,13 +416,16 @@ def processes_in(paths):
 
 
 def dev_runs():
-    if not DEV_RUNS:
-        return {}
-    try:
-        runs = json.loads(Path(DEV_RUNS).read_text()).get("runs", [])
-    except (OSError, ValueError):
-        return {}
-    return {(r.get("ticket") or "").upper(): r for r in runs}
+    """ticket → /dev run, merged across every workspace's companion project."""
+    runs = {}
+    for path in dict.fromkeys(str(w["dev_runs"]) for w in WORKSPACES if w["dev_runs"]):
+        try:
+            items = json.loads(Path(path).read_text()).get("runs", [])
+        except (OSError, ValueError):
+            continue
+        for r in items:
+            runs.setdefault((r.get("ticket") or "").upper(), r)
+    return runs
 
 
 # ---------------------------------------------------------------- per-worktree git
@@ -666,6 +759,8 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
                 "path": path,
                 "repo": repo.name,
                 "repo_path": str(repo),
+                "repo_kind": repo.kind,
+                "workspace": repo.workspace,
                 "slug": slug,
                 "branch": branch[len("refs/heads/"):] if isinstance(branch, str) else None,
                 "head": item.get("HEAD"),
@@ -706,7 +801,8 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
 
     out = []
     for w in raw:
-        m = TICKET_RE.search(w["branch"] or "") or TICKET_RE.search(w["name"])
+        ticket_re = next((ws["ticket_re"] for ws in WORKSPACES if ws["name"] == w["workspace"]), WORKSPACES[0]["ticket_re"])
+        m = ticket_re.search(w["branch"] or "") or ticket_re.search(w["name"])
         ticket = m.group(0).upper() if m else None
         run_ = runs.get(ticket) if ticket else None
         if run_ and run_.get("repo") not in (None, "", w["repo"]):
@@ -756,8 +852,121 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
             "sizes_complete": all(w["artifacts"]["kb"] is not None for w in out),
         },
         "worktrees": out,
-        "config": {"jira_url": CONFIG.get("jira_url"), "repos": CONFIG.get("repos", {})},
+        "workspaces": [{"name": w["name"], "bases": w["bases"], "jira_url": w["jira_url"],
+                        "configured": w["configured"]} for w in WORKSPACES],
+        "config": {"jira_url": WORKSPACES[0]["jira_url"],
+                   "repos": {k: v for w in reversed(WORKSPACES) for k, v in w["repos"].items()}},
     }
+
+
+# ---------------------------------------------------------------- create a worktree
+
+LOCKFILES = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"]
+CLONABLE_DEPS = ["node_modules"]  # relocatable as-is; a .venv bakes absolute paths in, so never cloned
+
+
+def find_repo(query):
+    q = query.lower()
+    repos = main_repos()
+    exact = [r for r in repos if str(r.path) == query or r.name.lower() == q]
+    if exact:
+        return exact[0]
+    hits = [r for r in repos if q in r.name.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    sys.exit("no single repo matches %r (%s)" % (query, ", ".join(r.name for r in hits) or "none"))
+
+
+def default_base(repo):
+    code, out, _ = git(repo.path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    return out.strip().split("/", 1)[1] if code == 0 and "/" in out else "main"
+
+
+def repos_info():
+    out = []
+    for r in main_repos():
+        _, refs, _ = git(r.path, "for-each-ref", "--format=%(refname:short)", "--sort=-committerdate", "refs/remotes/origin")
+        bases = [x.split("/", 1)[1] for x in refs.split() if "/" in x and not x.endswith("/HEAD")]
+        primary = [b for b in bases if re.match(r"(develop|main|master|release|releasing|staging)", b)]
+        out.append({"name": r.name, "path": str(r.path), "kind": r.kind, "workspace": r.workspace,
+                    "default_base": default_base(r), "bases": (primary + [b for b in bases if b not in primary])[:40]})
+    return out
+
+
+def worktree_dir(repo, branch):
+    """Sibling `worktrees/` folder next to the repo — never inside the source tree."""
+    root = repo.path.parent if repo.kind == "normal" else (repo.path.parent if repo.path.name in (".bare", ".git") else repo.path.parent)
+    return root / "worktrees" / ("%s-%s" % (repo.name, re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-")))
+
+
+def create_worktree(repo, branch, base, path=None, clone_deps=True):
+    """fetch origin/<base> (a failed fetch stops everything — never branch off a stale base),
+    record its SHA, add the worktree on a new branch, verify HEAD == that SHA, then:
+    copy `.env*.example` → `.env*`, and APFS-clone node_modules from the main checkout when the
+    lockfiles are identical (copy-on-write: ~15 s for 100k files, no extra disk)."""
+    steps = []
+    dest = Path(path).expanduser() if path else worktree_dir(repo, branch)
+    if dest.exists():
+        return {"ok": False, "error": "%s already exists" % dest, "steps": steps}
+    code, _, err = git(repo.path, "fetch", "origin", base, "--prune")
+    if code != 0:
+        return {"ok": False, "error": "git fetch origin %s failed — not creating from a stale base: %s" % (base, err.strip()), "steps": steps}
+    _, sha, _ = git(repo.path, "rev-parse", "origin/%s" % base)
+    sha = sha.strip()
+    steps.append("fetched origin/%s @ %s" % (base, sha[:10]))
+    code, _, err = git(repo.path, "show-ref", "--verify", "--quiet", "refs/heads/%s" % branch)
+    if code == 0:
+        return {"ok": False, "error": "branch %s already exists locally" % branch, "steps": steps}
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    code, _, err = git(repo.path, "worktree", "add", "--no-track", "-b", branch, str(dest), "origin/%s" % base)
+    if code != 0:
+        return {"ok": False, "error": err.strip(), "steps": steps}
+    _, head, _ = git(dest, "rev-parse", "HEAD")
+    if head.strip() != sha:
+        return {"ok": False, "error": "HEAD %s != origin/%s %s" % (head.strip()[:10], base, sha[:10]), "path": str(dest), "steps": steps}
+    steps.append("worktree %s on new branch %s, HEAD verified" % (dest, branch))
+
+    for ex in sorted(dest.glob(".env*.example")):
+        target = dest / ex.name[: -len(".example")]
+        if not target.exists():
+            shutil.copy2(ex, target)
+            steps.append("created %s from %s" % (target.name, ex.name))
+
+    deps = []
+    main = repo.path if repo.kind == "normal" else None
+    if clone_deps and main:
+        lock = next((l for l in LOCKFILES if (dest / l).exists()), None)
+        for d in CLONABLE_DEPS:
+            src = main / d
+            if not src.is_dir() or src.is_symlink():
+                continue
+            if lock and (main / lock).exists() and (main / lock).read_bytes() != (dest / lock).read_bytes():
+                deps.append({"dir": d, "cloned": False, "reason": "%s differs from the main checkout — run your install" % lock})
+                continue
+            t0 = time.time()
+            p = subprocess.run(["cp", "-c", "-R", str(src), str(dest / d)], capture_output=True, text=True)
+            ok = p.returncode == 0
+            deps.append({"dir": d, "cloned": ok, "seconds": round(time.time() - t0, 1),
+                         "reason": None if ok else p.stderr.strip()[:200]})
+            steps.append(("cloned %s from the main checkout (APFS, %.0fs)" % (d, time.time() - t0)) if ok else "could not clone %s" % d)
+    return {"ok": True, "path": str(dest), "branch": branch, "base": base, "base_sha": sha, "deps": deps, "steps": steps}
+
+
+# ---------------------------------------------------------------- worklog (optional, via the companion project)
+
+def worklog_today():
+    """Today's Jira worklog from the companion project's `scripts/worklog_day.py --json`."""
+    for ws in WORKSPACES:
+        script = ws["assistant"] and ws["assistant"] / "scripts" / "worklog_day.py"
+        if script and script.exists():
+            p = subprocess.run([sys.executable, str(script), "--json"], capture_output=True, text=True,
+                               cwd=str(ws["assistant"]), timeout=60)
+            try:
+                day = json.loads(p.stdout)["days"][0]
+            except (ValueError, KeyError, IndexError):
+                return {"available": True, "error": (p.stderr or p.stdout).strip()[-300:]}
+            return {"available": True, "band": [7 * 3600, 9 * 3600], "target": 8 * 3600, "day": day, "at": int(time.time())}
+    return {"available": False}
 
 
 # ---------------------------------------------------------------- commands
@@ -925,8 +1134,20 @@ def main():
     p.add_argument("--with-sessions", action="store_true", help="also Claude sessions + Warp tab per worktree")
     p = sub.add_parser("fetch", help="git fetch origin <PR base> for a worktree (updates behind/ahead)")
     p.add_argument("target")
-    p = sub.add_parser("config", help="show or change ~/.config/git-worktree-tracker/config.json")
-    p.add_argument("--set-bases", nargs="+", metavar="DIR", help="folders to scan for repos")
+    p = sub.add_parser("config", help="show or change workspaces in ~/.config/git-worktree-tracker/config.json")
+    p.add_argument("--workspace", help="workspace to change (default: the first one; created if missing)")
+    p.add_argument("--set-bases", nargs="+", metavar="DIR", help="folders scanned for repos")
+    p.add_argument("--rename", metavar="NAME", help="rename --workspace")
+    p.add_argument("--remove-workspace", metavar="NAME")
+    p = sub.add_parser("repos", help="repos with their default and candidate base branches (JSON)")
+    p = sub.add_parser("create", help="new worktree on a new branch off a freshly fetched base")
+    p.add_argument("repo")
+    p.add_argument("branch")
+    p.add_argument("--base", help="default: origin/HEAD")
+    p.add_argument("--path")
+    p.add_argument("--no-deps", action="store_true", help="do not clone node_modules")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("worklog", help="today's worklog via the companion project (JSON)")
     p = sub.add_parser("kill")
     p.add_argument("target")
     p.add_argument("--yes", action="store_true")
@@ -943,16 +1164,51 @@ def main():
     a = ap.parse_args()
 
     if a.cmd == "config":
-        if a.set_bases:
-            cfg = load_config()
-            cfg["bases"] = [str(Path(b).expanduser()) for b in a.set_bases]
-            cfg.pop("base", None)
+        cfg = load_config()
+        if a.set_bases or a.rename or a.remove_workspace:
+            if "workspaces" not in cfg:  # migrate a flat config into the first workspace
+                flat = {k: cfg.pop(k) for k in WORKSPACE_KEYS if k in cfg}
+                flat.setdefault("name", "Default")
+                if flat.get("base") and not flat.get("bases"):
+                    flat["bases"] = [flat.pop("base")]
+                flat.pop("base", None)
+                cfg["workspaces"] = [flat] if (flat.get("bases") or len(flat) > 1) else []
+            wss = cfg["workspaces"]
+            if a.remove_workspace:
+                wss[:] = [w for w in wss if w.get("name") != a.remove_workspace]
+            name = a.workspace or (wss[0]["name"] if wss else "Default")
+            target = next((w for w in wss if w.get("name") == name), None)
+            if (a.set_bases or a.rename) and target is None:
+                target = {"name": name}
+                wss.append(target)
+            if a.set_bases:
+                target["bases"] = [str(Path(b).expanduser()) for b in a.set_bases]
+            if a.rename:
+                target["name"] = a.rename
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             tmp = CONFIG_PATH.with_suffix(".tmp")
             tmp.write_text(json.dumps(cfg, indent=2) + "\n")
             os.replace(tmp, CONFIG_PATH)
-        print(json.dumps({"path": str(CONFIG_PATH), "config": load_config(), "bases": BASES if not a.set_bases else
-                          cfg["bases"], "configured": CONFIGURED or bool(a.set_bases)}, indent=2))
+        shown = load_workspaces(load_config())
+        print(json.dumps({"path": str(CONFIG_PATH), "workspaces": [
+            {"name": w["name"], "bases": w["bases"], "configured": w["configured"]} for w in shown]}, indent=2))
+        return
+
+    if a.cmd == "repos":
+        json.dump(repos_info(), sys.stdout)
+        return
+
+    if a.cmd == "create":
+        repo = find_repo(a.repo)
+        res = create_worktree(repo, a.branch, a.base or default_base(repo), a.path, not a.no_deps)
+        if a.json:
+            json.dump(res, sys.stdout)
+        else:
+            print("\n".join(res.get("steps", [])) + ("\n" + res["error"] if not res["ok"] else ""))
+        sys.exit(0 if res["ok"] else 1)
+
+    if a.cmd == "worklog":
+        json.dump(worklog_today(), sys.stdout)
         return
 
     if a.cmd == "procs":

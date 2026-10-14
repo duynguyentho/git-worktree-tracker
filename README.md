@@ -30,8 +30,34 @@ It answers four questions:
   your local refs, so it is as fresh as your last fetch, and **Fetch** updates it.
 - **Needs attention.** This filter collects every PR with failing checks, a conflict or
   requested changes.
+- **Workspaces.** Keep separate sets of folders, for example *Work* and *Personal*, each with
+  its own Jira URL, ticket pattern and repo labels. Switch between them in the sidebar, or
+  view all of them together.
+- **Finds every kind of repo.** It finds normal checkouts, bare repos (`repo.git/`, the
+  `.bare/` layout) and repos whose main checkout sits outside your folders but which have a
+  worktree inside them. Repos are searched up to three levels deep.
 - **Any stack.** Go, Python, Node, Rust, JVM, Swift, Ruby, PHP, Elixir and Terraform are
   detected from their marker files.
+
+### Start a ticket in one step
+
+**+ New** (⌘N) creates a worktree for a ticket in a sibling `worktrees/` folder, on a new branch.
+The branch defaults to `feat/ABC-123` and you can edit it.
+
+1. **Fresh base.** Runs `git fetch origin <base>` first. If the fetch fails, nothing is
+   created, so a worktree never starts from a stale base.
+2. **Verified.** Records the base SHA and checks that the new HEAD matches it.
+3. **Env files.** Copies `.env*.example` to `.env*`.
+4. **Dependencies.** Clones `node_modules` from the main checkout with APFS copy-on-write
+   (seconds, and no extra disk) when the lockfiles are identical. When they differ, it tells
+   you to run your install.
+
+### Notifications
+
+The app posts a macOS banner when a PR newly has **failing checks**, a **conflict** or
+**requested changes**, or when it gets **approved** or **merged**. Click the banner to open
+that worktree. PR states are checked every two minutes and persisted, so restarting the app
+never re-alerts. The bell in the toolbar turns this on or off.
 
 ### PR and CI without opening GitHub
 
@@ -50,6 +76,15 @@ the next step. Status comes from `gh` and is cached for two minutes.
   **Stop all**.
 - **Running.** The sidebar card shows what is running right now, with a sparkline per
   worktree.
+
+### This Mac and today's worklog
+
+The sidebar shows the whole machine, refreshed every second: CPU, memory used (as Activity
+Monitor counts it) and network in/out, each with a sparkline, next to the disk bar.
+
+With a companion project that provides `scripts/worklog_day.py`, the sidebar also shows a
+**worklog donut**: today's logged time per ticket against an 8h target and a 7–9h band. It is
+coloured *under*, *balanced* or *over*. Click it for the list of entries.
 
 ### Jump to the right terminal tab
 
@@ -125,33 +160,59 @@ sidebar.
 
 ## Configuration
 
-Every setting is optional and lives outside the repo, in
+Everything is optional and set from the app: the welcome sheet, **Change folders…**, and the
+workspace menu (**New**, **Rename**, **Remove**). The settings live outside the repo, in
 `~/.config/git-worktree-tracker/config.json`:
 
 ```json
 {
-  "bases": ["~/Projects", "~/work/acme"],
+  "workspaces": [
+    {
+      "name": "Work",
+      "bases": ["~/work/acme"],
+      "jira_url": "https://acme.atlassian.net",
+      "ticket_regex": "\\bACME-\\d+\\b",
+      "repos": { "payments-api": { "label": "payments", "hue": 250 } },
+      "assistant": "~/Projects/my-assistant"
+    },
+    { "name": "Personal", "bases": ["~/Projects", "~/Developer"] }
+  ],
   "scan_depth": 3,
-  "jira_url": "https://acme.atlassian.net",
-  "ticket_regex": "\\bACME-\\d+\\b",
-  "repos": { "payments-api": { "label": "payments", "hue": 250 } },
-  "artifact_dirs": ["node_modules", ".venv", "target"],
-  "assistant": "~/Projects/my-assistant"
+  "artifact_dirs": ["node_modules", ".venv", "target"]
 }
 ```
 
-| Key | Default | Purpose |
+| Key (per workspace) | Default | Purpose |
 |-----|---------|---------|
-| `bases` | common code folders that exist | Folders scanned for repos. Set from the app's welcome sheet or **Change folders…**. Worktrees are discovered through each repo's `git worktree list`, wherever they live |
-| `scan_depth` | `3` | How many folder levels below each base are searched for repos |
-| `jira_url` | — | Shows the Jira buttons for ticket keys |
+| `name` | `Default` | Shown in the workspace switcher |
+| `bases` | common code folders that exist | Folders searched for repos |
+| `scan_depth` | `3` | How many folder levels below each base are searched (per workspace or top level) |
+| `jira_url` | — | Shows the Jira buttons for this workspace's ticket keys |
 | `ticket_regex` | `\b[A-Z][A-Z0-9]+-\d+\b` | How a ticket key is read from a branch or folder name |
 | `repos` | name + derived colour | Short label and OKLCH hue per repo |
-| `artifact_dirs` | `node_modules`, `.venv`, `venv`, `.tox`, `vendor`, `target`, `build`, `dist`, `.next`, `.gradle`, `.build`, `Pods`, … | Top-level folders measured and moved aside on removal, only when git ignores them |
-| `assistant` | — | Optional companion project that provides `/dev` run state (`.claude/memory/dev-runs.json`) and `scripts/pr_watch.py` for PR/CI status. Without it, those panels are hidden |
+| `assistant` | — | Optional companion project that provides `/dev` run state and `scripts/pr_watch.py` for PR/CI status |
 
-Environment variables override the file: `WT_BASE`, `WT_ASSISTANT`, `WT_DEV_RUNS`,
-`WT_PR_WATCH_DIR`, `WT_CACHE_PATH`, `WT_BACKUPS`, `WT_CONFIG`, `GH_BIN`.
+`artifact_dirs` (top level) lists the folders that are measured and moved aside on removal,
+and only when git ignores them. The default covers `node_modules`, `.venv`, `venv`, `.tox`,
+`vendor`, `target`, `build`, `dist`, `.next`, `.gradle`, `.build`, `Pods` and more. An older
+flat config (top-level `bases` or `base`) still works, and is read as one workspace.
+
+### How repos are found
+
+Each base is walked up to `scan_depth` levels. Hidden folders and `node_modules`, `vendor`,
+`target`, `dist`, `build` are skipped. A folder counts as:
+
+- **a repo** when it has a `.git` directory, or when it is a bare repo (`HEAD`, `objects/`,
+  `refs/`);
+- **a worktree** when it has a `.git` file. Its `gitdir:` points back to the shared git dir,
+  so the repo it belongs to is found even if that repo lives elsewhere.
+
+The app does not search inside a repo once it has found one. For every repo it then asks git
+for the full list with `git worktree list --porcelain`, so worktrees are shown wherever they
+live on disk.
+
+Environment variables override the file: `WT_BASE` (a single folder), `WT_ASSISTANT`,
+`WT_DEV_RUNS`, `WT_PR_WATCH_DIR`, `WT_CACHE_PATH`, `WT_BACKUPS`, `WT_CONFIG`, `GH_BIN`.
 
 | Data | Location |
 |------|----------|
@@ -163,6 +224,7 @@ Environment variables override the file: `WT_BASE`, `WT_ASSISTANT`, `WT_DEV_RUNS
 
 | Keys | Action |
 |------|--------|
+| ⌘N | New worktree |
 | ⌘K | Search worktrees |
 | ↑ ↓ (⇧ to extend) | Move the selection |
 | ⌘-click / ⇧-click / ⌘A | Multi-select |
@@ -183,6 +245,10 @@ python3 scripts/wt.py prune [--yes]                  # every clean worktree whos
 python3 scripts/wt.py procs [--with-sessions] [PATH...]
 python3 scripts/wt.py kill <name|KEY> [--yes]        # SIGTERM processes running inside
 python3 scripts/wt.py fetch <name|KEY>               # git fetch origin <PR base>
+python3 scripts/wt.py create <repo> <branch> [--base develop] [--no-deps] [--json]
+python3 scripts/wt.py repos                          # repos + candidate base branches (JSON)
+python3 scripts/wt.py worklog                        # today's worklog via the companion project
+python3 scripts/wt.py config [--workspace NAME] [--set-bases DIR...] [--rename NAME] [--remove-workspace NAME]
 ```
 
 ## Project layout
