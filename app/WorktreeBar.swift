@@ -25,7 +25,7 @@ struct Disk: Decodable { let free_gb: Double; let total_gb: Double }
 
 struct Totals: Decodable {
     let count: Int
-    let node_modules_gb: Double
+    let artifacts_gb: Double
     let reclaimable_gb: Double
     let sizes_complete: Bool
 }
@@ -46,7 +46,8 @@ struct Worktree: Decodable, Identifiable {
     let git: GitInfo
     let pr: PullRequest?
     let run: RunInfo?
-    let node_modules: NodeModules
+    let artifacts: Artifacts
+    let ecosystems: [String]?
     var procs: [Proc]
     let pr_status: PRStatus?
     let base_sync: BaseSync?
@@ -62,7 +63,7 @@ struct Worktree: Decodable, Identifiable {
     var dirty: Int { (git.modified ?? 0) + (git.untracked ?? 0) }
     var title: String { ticket ?? name }
     var branchLabel: String { branch ?? "detached @ \(head.map { String($0.prefix(8)) } ?? "?")" }
-    var gb: Double { Double(node_modules.kb ?? 0) / 1e6 }
+    var gb: Double { Double(artifacts.kb ?? 0) / 1e6 }
     var missingPath: Bool { state == "missing" }
     var forceRemovable: Bool { !removable && (force_blockers ?? ["unknown"]).isEmpty }
     var forceLoss: String { remove_blockers.joined(separator: " · ") }
@@ -139,7 +140,23 @@ struct PullRequest: Decodable {
 }
 
 struct RunInfo: Decodable { let stage: String?; let status: String?; let next_action: String?; let updated: String? }
-struct NodeModules: Decodable { let kind: String; let kb: Int? }
+/// Git-ignored dependency/build dirs at the worktree root (node_modules, .venv, target, …).
+struct Artifacts: Decodable {
+    let kind: String
+    let kb: Int?
+    let items: [ArtifactItem]?
+
+    var label: String {
+        let names = (items ?? []).filter { $0.kind == "dir" }.map(\.name)
+        return names.count == 1 ? names[0] : "Deps & builds"
+    }
+    var breakdown: String {
+        (items ?? []).map { "\($0.name)  \($0.kind == "link" ? "linked" : $0.kb.map { String(format: "%.1f GB", Double($0) / 1e6) } ?? "…")" }
+            .joined(separator: "\n")
+    }
+}
+
+struct ArtifactItem: Decodable, Hashable { let name: String; let kind: String; let kb: Int? }
 struct Proc: Decodable {
     let pid: Int
     let name: String?
@@ -160,11 +177,27 @@ func cpuText(_ c: Double) -> String { c < 10 ? String(format: "%.1f%%", c) : Str
 let stateOrder = ["active", "review", "idle", "stale", "merged", "closed", "missing"]
 let prunable: Set<String> = ["merged", "closed", "missing"]
 
-let editors: [(id: String, label: String, app: String)] = [
-    ("webstorm", "WebStorm", "WebStorm"),
-    ("code", "VS Code", "Visual Studio Code"),
-    ("cursor", "Cursor", "Cursor"),
-]
+/// Editors found on this Mac (id, label, bundle id), in preference order.
+let editors: [(id: String, label: String, app: String)] = {
+    let known: [(String, String, [String])] = [
+        ("code", "VS Code", ["com.microsoft.VSCode"]),
+        ("cursor", "Cursor", ["com.todesktop.230313mzl4w4u92"]),
+        ("webstorm", "WebStorm", ["com.jetbrains.WebStorm"]),
+        ("goland", "GoLand", ["com.jetbrains.goland"]),
+        ("pycharm", "PyCharm", ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce"]),
+        ("idea", "IntelliJ IDEA", ["com.jetbrains.intellij", "com.jetbrains.intellij.ce"]),
+        ("rider", "Rider", ["com.jetbrains.rider"]),
+        ("zed", "Zed", ["dev.zed.Zed"]),
+        ("sublime", "Sublime Text", ["com.sublimetext.4", "com.sublimetext.3"]),
+        ("xcode", "Xcode", ["com.apple.dt.Xcode"]),
+    ]
+    let found = known.compactMap { id, label, ids -> (id: String, label: String, app: String)? in
+        ids.first { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil }.map { (id, label, $0) }
+    }
+    return found.isEmpty ? [("finder", "Finder", "com.apple.finder")] : found
+}()
+
+let hasWarp = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.warp.Warp-Stable") != nil
 
 // MARK: - Theme (tokens from the "Worktrees for macOS" design canvas, app-tokens)
 
@@ -306,7 +339,7 @@ func relative(_ ts: Int?) -> String {
     return "\(Int(s / 86400))d ago"
 }
 
-func sizeText(_ nm: NodeModules) -> String {
+func sizeText(_ nm: Artifacts) -> String {
     switch nm.kind {
     case "link": return "linked"
     case "dir": return nm.kb.map { String(format: "%.1f GB", Double($0) / 1e6) } ?? "…"
@@ -316,11 +349,13 @@ func sizeText(_ nm: NodeModules) -> String {
 
 func shortSession(_ s: ClaudeSession) -> String {
     let n = s.name ?? "claude"
-    return (n.split(separator: "-").last.map(String.init) ?? n) + (s.status == "busy" ? " · busy" : "")
+    return n.split(separator: "-").last.map(String.init) ?? n
 }
 
 func gbText(_ gb: Double) -> String { String(format: "%.1f GB", gb) }
-func plural(_ n: Int, _ word: String) -> String { "\(n) \(word)\(n == 1 ? "" : "s")" }
+func plural(_ n: Int, _ word: String) -> String {
+    n == 1 ? "1 \(word)" : "\(n) \(word)\(word.hasSuffix("s") ? "es" : "s")"
+}
 
 // MARK: - Live sampler (libproc — what Activity Monitor reads; ~1ms for every process on the machine)
 
@@ -555,12 +590,26 @@ final class Store: ObservableObject {
     var running: [Worktree] { worktrees.filter { !$0.procs.isEmpty }.sorted { $0.rssKB > $1.rssKB } }
 
     /// Live RAM/CPU: `wt.py procs <paths>` (~0.3s) every 5s while the app is frontmost.
+    private func synthesiseHistory() {
+        guard history.isEmpty, let d = data else { return }
+        let now = Date()
+        for w in d.worktrees where !w.procs.isEmpty {
+            let seed = Double(w.path.count)
+            history[w.path] = (0..<Self.historyLength).map { i in
+                let t = Double(i)
+                let cpu = max(0, w.cpu * (0.55 + 0.45 * sin(t / 7 + seed)) + 25 * sin(t / 2.3) * sin(t / 11))
+                let mem = Double(w.rssKB) * (0.82 + 0.18 * Double(i) / Double(Self.historyLength))
+                return LiveSample(t: now.addingTimeInterval(Double(i - Self.historyLength)), cpu: cpu, memKB: Int(mem))
+            }
+        }
+    }
+
     var visible: Bool { NSApp.windows.contains { $0.isVisible && $0.occlusionState.contains(.visible) } }
 
     /// Command lines + listening ports change rarely and need lsof — refreshed from wt.py every 15s.
     /// Membership, CPU and memory come from the 1s libproc sampler below.
     func pollProcesses() {
-        guard visible, !polling, busy == nil, let paths = data?.worktrees.map(\.path), !paths.isEmpty else { return }
+        guard Self.fixture == nil, visible, !polling, busy == nil, let paths = data?.worktrees.map(\.path), !paths.isEmpty else { return }
         polling = true
         Task {
             let (code, out, _) = await Shell.run("/usr/bin/python3", [script, "procs", "--with-sessions"] + paths)
@@ -579,6 +628,10 @@ final class Store: ObservableObject {
     }
 
     func sampleLive() {
+        if Self.fixture != nil {
+            synthesiseHistory()
+            return
+        }
         guard visible, var d = data, !d.worktrees.isEmpty else { return }
         let byRoot = sampler.sample(roots: d.worktrees.filter { !$0.missingPath }.map(\.path), enrich: enrich)
         let now = Date()
@@ -617,7 +670,20 @@ final class Store: ObservableObject {
         }
     }
 
+    /// Demo mode for screenshots: `WT_FIXTURE=demo.json` renders a saved payload — no scanning,
+    /// no gh, no process sampling (CPU history is synthesised for worktrees with processes).
+    static let fixture = ProcessInfo.processInfo.environment["WT_FIXTURE"]
+
     private func load(_ args: [String]) async {
+        if let f = Self.fixture {
+            if let raw = FileManager.default.contents(atPath: f) {
+                do {
+                    data = try JSONDecoder().decode(Payload.self, from: raw)
+                    RepoStyle.config = data?.config?.repos ?? [:]
+                } catch { self.error = "fixture: \(error)" }
+            }
+            return
+        }
         let (code, out, err) = await Shell.run("/usr/bin/python3", [script] + args)
         guard code == 0, let raw = out.data(using: .utf8) else {
             error = err.isEmpty ? "wt.py exited \(code)" : String(err.suffix(400))
@@ -654,14 +720,18 @@ final class Store: ObservableObject {
     }
 
     static var editor: (id: String, label: String, app: String) {
-        let id = UserDefaults.standard.string(forKey: "editor") ?? "webstorm"
+        let id = UserDefaults.standard.string(forKey: "editor") ?? editors[0].id
         return editors.first { $0.id == id } ?? editors[0]
     }
 
-    func openEditor(_ w: Worktree) { Shell.open(["-a", Self.editor.app, w.path]) }
+    func openEditor(_ w: Worktree) { Shell.open(["-b", Self.editor.app, w.path]) }
     /// Jumps to the Warp pane already working on this worktree (the Claude session on it, a process
     /// running in it, or a shell cd'ed into it) via Warp's own `warp://session/<uuid>`; else a new tab there.
     func openTerminal(_ w: Worktree) {
+        guard hasWarp else {
+            Shell.open(["-a", "Terminal", w.path])
+            return
+        }
         if let u = w.warp?.uuid {
             Shell.open(["warp://session/\(u)"])
         } else {
@@ -1478,7 +1548,7 @@ struct StorageCard: View {
         let d = store.data!
         let total = max(d.disk.total_gb, 1)
         let used = total - d.disk.free_gb
-        let nm = d.totals.node_modules_gb
+        let nm = d.totals.artifacts_gb
         let reclaim = store.pruneCandidates.reduce(0) { $0 + $1.gb }
         let cands = store.cleanupCandidates.count
 
@@ -1502,7 +1572,7 @@ struct StorageCard: View {
             .clipShape(Capsule())
             .help("\(Int(used / total * 100))% used")
             VStack(spacing: 6) {
-                legend(T.diskNM, "node_modules", gbText(nm), T.fg)
+                legend(T.diskNM, "Deps & builds", gbText(nm), T.fg)
                 legend(T.diskReclaim, "Reclaimable", gbText(reclaim), T.amber)
             }
             Button { showCleanup = true } label: {
@@ -1543,7 +1613,7 @@ struct RowView: View {
             Glyph(state: w.state).padding(.top, 1)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(w.title).font(F.ui(14, .semibold)).tracking(-0.14).lineLimit(1)
+                    Text(w.title).font(F.ui(14, .semibold)).tracking(-0.14).lineLimit(1).fixedSize()
                     let rs = RepoStyle.of(w.repo)
                     Chip(text: rs.short, tone: rs.tone, radius: 6).fixedSize()
                     Spacer(minLength: 4)
@@ -1559,7 +1629,7 @@ struct RowView: View {
                 HStack(spacing: 8) {
                     Text(w.branchLabel).font(F.mono(12)).foregroundStyle(T.muted).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 4)
-                    Text((w.node_modules.kind == "dir" ? sizeText(w.node_modules) + " · " : "") + relative(w.git.activity_ts))
+                    Text((w.artifacts.kind == "dir" ? sizeText(w.artifacts) + " · " : "") + relative(w.git.activity_ts))
                         .font(F.ui(12)).monospacedDigit().foregroundStyle(T.subtle).fixedSize()
                 }
                 if w.dirty > 0 || !w.procs.isEmpty || w.run != nil || !(w.sessions ?? []).isEmpty {
@@ -1635,7 +1705,7 @@ struct WorktreeMenu: View {
 
     var body: some View {
         ForEach(editors, id: \.id) { e in
-            Button("Open in \(e.label)") { Shell.open(["-a", e.app, w.path]) }
+            Button("Open in \(e.label)") { Shell.open(["-b", e.app, w.path]) }
         }
         Button(w.warp == nil ? "Open in Warp" : "Jump to Warp tab") { store.openTerminal(w) }
         Button("New Warp tab here") { store.openNewWarpTab(w) }
@@ -1670,7 +1740,8 @@ struct DetailView: View {
                 HStack(spacing: 8) {
                     Tile(label: "Working tree", value: w.dirty == 0 ? "Clean" : "\(w.dirty) changed",
                          tint: w.dirty == 0 ? T.green : T.amber)
-                    Tile(label: "node_modules", value: sizeText(w.node_modules))
+                    Tile(label: w.artifacts.label, value: sizeText(w.artifacts))
+                        .help(w.artifacts.breakdown.isEmpty ? "No git-ignored dependency or build folders" : w.artifacts.breakdown)
                     Tile(label: "Last activity", value: relative(w.git.activity_ts))
                     if !w.procs.isEmpty {
                         Tile(label: "RAM · CPU", value: w.usage, tint: T.danger)
@@ -1697,6 +1768,7 @@ struct DetailView: View {
                     Chip(text: w.repo, tone: RepoStyle.of(w.repo).tone)
                     let st = StateStyle.of(w.state)
                     Chip(text: st.title, tone: st.tone)
+                    ForEach(w.ecosystems ?? [], id: \.self) { Chip(text: $0, tone: Tone(fg: T.muted, bg: T.well)) }
                     if let pr = w.pr {
                         let (label, tone) = w.pr_status.map { let t = prStatusTone($0); return (t.0, t.1) } ?? prTone(pr)
                         Chip(text: "#\(String(pr.number)) · \(label)", tone: tone)
@@ -1719,7 +1791,7 @@ struct DetailView: View {
             }
             .buttonStyle(TButtonStyle(kind: .primary))
             Button { store.openTerminal(w) } label: {
-                Label(w.warp == nil ? "New Warp tab" : "Warp tab", systemImage: "apple.terminal")
+                Label(!hasWarp ? "Terminal" : w.warp == nil ? "New Warp tab" : "Warp tab", systemImage: "apple.terminal")
             }
             .buttonStyle(TButtonStyle())
             .help(w.warp.map { "Jump to the Warp pane of \($0.source == "claude" ? "Claude session " : "")\($0.label ?? "")" }
@@ -2019,7 +2091,7 @@ struct DetailView: View {
     var cleanBody: String {
         if w.removable {
             return w.pr?.state == "MERGED"
-                ? "PR merged and the tree is clean. Frees \(sizeText(w.node_modules)). The local branch is kept."
+                ? "PR merged and the tree is clean. Frees \(sizeText(w.artifacts)). The local branch is kept."
                 : "Nothing uncommitted, unpushed or running. The local branch is kept."
         }
         let rest = w.remove_blockers.count > 1 ? w.remove_blockers.joined(separator: " · ") + ". " : ""
@@ -2167,7 +2239,7 @@ struct MultiSelectView: View {
             let rs = RepoStyle.of(w.repo)
             Chip(text: rs.short, tone: rs.tone, radius: 6)
             Spacer()
-            Text(sizeText(w.node_modules)).font(F.ui(12)).monospacedDigit().foregroundStyle(T.subtle)
+            Text(sizeText(w.artifacts)).font(F.ui(12)).monospacedDigit().foregroundStyle(T.subtle)
         }
     }
 }
@@ -2202,7 +2274,7 @@ struct CleanupSheet: View {
                     .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(T.amberSoft))
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Clean up merged worktrees").font(F.ui(18, .bold)).tracking(-0.18)
-                    Text("\(plural(cands.count, "worktree")) \(cands.count == 1 ? "has" : "have") a merged or closed PR. Removing one deletes its folder and node_modules — the branch stays on origin. Tick an amber row to force it: its changes are backed up first.")
+                    Text("\(plural(cands.count, "worktree")) \(cands.count == 1 ? "has" : "have") a merged or closed PR. Removing one deletes its folder and its dependency/build folders — the branch stays on origin. Tick an amber row to force it: its changes are backed up first.")
                         .font(F.ui(13)).foregroundStyle(T.muted).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -2305,7 +2377,7 @@ struct CleanupSheet: View {
             Text(w.pr.map { "#" + String($0.number) } ?? "—").font(F.ui(12, .semibold))
                 .foregroundStyle(w.pr != nil ? T.purple : T.subtle)
                 .frame(width: 80, alignment: .leading)
-            Text(w.node_modules.kind == "dir" ? sizeText(w.node_modules) : "—").monospacedDigit().foregroundStyle(T.muted)
+            Text(w.artifacts.kind == "dir" ? sizeText(w.artifacts) : "—").monospacedDigit().foregroundStyle(T.muted)
                 .frame(width: 64, alignment: .trailing)
         }
         .padding(.horizontal, 14).padding(.vertical, 12)

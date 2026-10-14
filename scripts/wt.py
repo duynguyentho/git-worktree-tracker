@@ -150,36 +150,82 @@ def fetch_prs(slugs, refresh, offline=False):
     return by_branch
 
 
-def node_modules_sizes(paths, compute):
+ARTIFACT_DIRS = CONFIG.get("artifact_dirs") or [
+    "node_modules", ".next", ".nuxt", ".turbo", "dist",          # JS / TS
+    ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",     # Python
+    "vendor",                                                    # Go / PHP (only when git-ignored)
+    "target", "build", ".gradle",                                # Rust / JVM
+    ".build", "Pods", "DerivedData",                             # Swift / iOS
+]
+ECOSYSTEM_MARKERS = [
+    ("go.mod", "go"), ("pyproject.toml", "python"), ("requirements.txt", "python"), ("setup.py", "python"),
+    ("Pipfile", "python"), ("package.json", "node"), ("Cargo.toml", "rust"), ("pom.xml", "java"),
+    ("build.gradle", "java"), ("build.gradle.kts", "kotlin"), ("Package.swift", "swift"), ("Gemfile", "ruby"),
+    ("composer.json", "php"), ("mix.exs", "elixir"), ("main.tf", "terraform"),
+]
+
+
+def ecosystems(path):
+    seen = []
+    for marker, eco in ECOSYSTEM_MARKERS:
+        if eco not in seen and (Path(path) / marker).exists():
+            seen.append(eco)
+    return seen
+
+
+def ignored_artifacts(path):
+    """Top-level dependency/build dirs that exist AND git ignores — a tracked dir (a committed Go
+    `vendor/`) is never counted or touched."""
+    present = [d for d in ARTIFACT_DIRS if (Path(path) / d).is_dir() or (Path(path) / d).is_symlink()]
+    if not present:
+        return []
+    p = subprocess.run(["git", "--no-optional-locks", "-C", str(path), "check-ignore", "--stdin"],
+                       input="\n".join(present), capture_output=True, text=True)
+    ignored = set(p.stdout.split())
+    return [d for d in present if d in ignored]
+
+
+def artifact_sizes(paths, compute):
+    """path → {"kind": dir|link|none, "kb": total or None while unmeasured, "items": [{name, kind, kb}]}."""
     cache = load_cache()
     sizes = cache.setdefault("sizes", {})
     now = time.time()
     result, todo = {}, []
+    with ThreadPoolExecutor(8) as ex:
+        found = dict(zip(paths, ex.map(ignored_artifacts, paths)))
     for p in paths:
-        nm = Path(p) / "node_modules"
-        if nm.is_symlink():
-            result[p] = {"kind": "link", "kb": 0}
-        elif not nm.is_dir():
-            result[p] = {"kind": "none", "kb": 0}
-        else:
-            hit = sizes.get(p)
-            if hit and now - hit["at"] < SIZE_TTL:
-                result[p] = {"kind": "dir", "kb": hit["kb"]}
-            else:
-                result[p] = {"kind": "dir", "kb": hit["kb"] if hit else None}
-                todo.append(p)
+        items = []
+        for name in found[p]:
+            d = Path(p) / name
+            if d.is_symlink():
+                items.append({"name": name, "kind": "link", "kb": 0})
+                continue
+            key = "%s::%s" % (p, name)
+            hit = sizes.get(key)
+            item = {"name": name, "kind": "dir", "kb": hit["kb"] if hit else None}
+            if not hit or now - hit["at"] >= SIZE_TTL:
+                todo.append((p, name, item))
+            items.append(item)
+        result[p] = items
     if compute and todo:
-        def du(p):
-            code, out, _ = run(["du", "-sk", str(Path(p) / "node_modules")], timeout=300)
-            return p, int(out.split()[0]) if code == 0 and out else None
+        def du(job):
+            p, name, item = job
+            code, out, _ = run(["du", "-sk", str(Path(p) / name)], timeout=300)
+            return job, int(out.split()[0]) if code == 0 and out else None
 
         with ThreadPoolExecutor(6) as ex:
-            for p, kb in ex.map(du, todo):
+            for (p, name, item), kb in ex.map(du, todo):
                 if kb is not None:
-                    sizes[p] = {"kb": kb, "at": now}
-                    result[p]["kb"] = kb
+                    sizes["%s::%s" % (p, name)] = {"kb": kb, "at": now}
+                    item["kb"] = kb
         save_cache(cache)
-    return result
+    out = {}
+    for p, items in result.items():
+        dirs = [i for i in items if i["kind"] == "dir"]
+        kind = "dir" if dirs else ("link" if items else "none")
+        total = None if any(i["kb"] is None for i in dirs) else sum(i["kb"] for i in dirs)
+        out[p] = {"kind": kind, "kb": total, "items": items}
+    return out
 
 
 def processes_in(paths):
@@ -616,7 +662,7 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
         del ucache[p]
     save_cache(cache)
     prs = fetch_prs(sorted({w["slug"] for w in raw if w["slug"]}), refresh, offline)
-    nm = node_modules_sizes(live, sizes)
+    nm = artifact_sizes(live, sizes)
     procs = processes_in(live)
     runs = dev_runs()
 
@@ -635,7 +681,8 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
             git=states.get(w["path"], {"modified": 0, "untracked": 0}),
             pr=prs.get((w["slug"], w["branch"])),
             run={k: run_.get(k) for k in ("stage", "status", "next_action", "updated")} if run_ else None,
-            node_modules=nm.get(w["path"], {"kind": "none", "kb": 0}),
+            artifacts=nm.get(w["path"], {"kind": "none", "kb": 0, "items": []}),
+            ecosystems=ecosystems(w["path"]) if not w["missing"] else [],
             procs=procs.get(w["path"], []),
         )
         w["state"], w["reasons"] = classify(w, now)
@@ -655,8 +702,8 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
         w["warp"] = t.get("warp")
     out.sort(key=lambda w: (STATE_ORDER.index(w["state"]), -w["git"].get("activity_ts", 0)))
     du = shutil.disk_usage(str(Path.home()))
-    nm_kb = sum(w["node_modules"]["kb"] or 0 for w in out)
-    reclaim_kb = sum(w["node_modules"]["kb"] or 0 for w in out
+    nm_kb = sum(w["artifacts"]["kb"] or 0 for w in out)
+    reclaim_kb = sum(w["artifacts"]["kb"] or 0 for w in out
                      if w["removable"] and w["state"] in PRUNABLE)
     return {
         "generated_at": int(now),
@@ -665,9 +712,9 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
         "totals": {
             "count": len(out),
             "by_state": {s: sum(1 for w in out if w["state"] == s) for s in STATE_ORDER},
-            "node_modules_gb": round(nm_kb / 1e6, 1),
+            "artifacts_gb": round(nm_kb / 1e6, 1),
             "reclaimable_gb": round(reclaim_kb / 1e6, 1),
-            "sizes_complete": all(w["node_modules"]["kb"] is not None for w in out),
+            "sizes_complete": all(w["artifacts"]["kb"] is not None for w in out),
         },
         "worktrees": out,
         "config": {"jira_url": CONFIG.get("jira_url"), "repos": CONFIG.get("repos", {})},
@@ -742,9 +789,9 @@ def backup_changes(w):
 
 
 def do_remove(w, force=False):
-    """node_modules (~100k files, ~7s to unlink) is renamed into TRASH first — instant on the
-    same volume — so `git worktree remove` only deletes the source tree. If git refuses, it is
-    renamed back. TRASH is emptied by a detached `rm -rf` (purge_trash)."""
+    """Git-ignored dependency/build dirs (node_modules alone is ~100k files, ~7s to unlink) are
+    renamed into TRASH first — instant on the same volume — so `git worktree remove` only deletes
+    the source tree. If git refuses, they are renamed back. TRASH is emptied by a detached `rm -rf`."""
     if w["missing"]:
         code, _, err = git(w["repo_path"], "worktree", "prune")
         return code == 0, err.strip()
@@ -753,22 +800,26 @@ def do_remove(w, force=False):
         if backup is None:
             return False, "backup failed, nothing removed: " + err
         w["backup"] = backup
-    nm = Path(w["path"]) / "node_modules"
-    parked = None
-    if nm.is_dir() and not nm.is_symlink():
+    parked = []
+    for name in ignored_artifacts(w["path"]):
+        d = Path(w["path"]) / name
+        if d.is_symlink():
+            continue
         TRASH.mkdir(exist_ok=True)
-        parked = TRASH / ("%s-%d" % (w["name"], time.time() * 1000))
+        dest = TRASH / ("%s-%s-%d" % (w["name"], name.strip("."), time.time() * 1000))
         try:
-            os.rename(nm, parked)
+            os.rename(d, dest)
+            parked.append((d, dest))
         except OSError:
-            parked = None
+            pass
     code, _, err = git(w["repo_path"], "worktree", "remove", *(["--force"] if force else []), w["path"])
     if code != 0:
-        if parked:
-            os.rename(parked, nm)
+        for original, dest in parked:
+            os.rename(dest, original)
         return False, err.strip()
     cache = load_cache()
-    cache.get("sizes", {}).pop(w["path"], None)
+    for key in [k for k in cache.get("sizes", {}) if k.startswith(w["path"] + "::")]:
+        del cache["sizes"][key]
     save_cache(cache)
     return True, ""
 
@@ -798,15 +849,15 @@ def human_age(ts):
 
 def print_table(data):
     t = data["totals"]
-    print("%d worktrees · node_modules %s GB · reclaimable %s GB · disk free %s GB" % (
-        t["count"], t["node_modules_gb"], t["reclaimable_gb"], data["disk"]["free_gb"]))
+    print("%d worktrees · dependencies/builds %s GB · reclaimable %s GB · disk free %s GB" % (
+        t["count"], t["artifacts_gb"], t["reclaimable_gb"], data["disk"]["free_gb"]))
     cur = None
     for w in data["worktrees"]:
         if w["state"] != cur:
             cur = w["state"]
             print("\n" + cur.upper())
         pr = w["pr"]
-        nm = w["node_modules"]
+        nm = w["artifacts"]
         size = "link" if nm["kind"] == "link" else ("-" if nm["kb"] is None else "%.1fG" % (nm["kb"] / 1e6)) if nm["kind"] == "dir" else ""
         print("  %-55s %-5s %-6s %-12s %s" % (
             w["name"][:55], human_age(w["git"].get("activity_ts", 0)), size,
@@ -819,7 +870,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("list")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--sizes", action="store_true", help="compute missing/expired node_modules sizes")
+    p.add_argument("--sizes", action="store_true", help="compute missing/expired dependency/build dir sizes")
     p.add_argument("--refresh", action="store_true", help="ignore the PR cache")
     p.add_argument("--offline", action="store_true", help="never call gh — PR states from cache, however old")
     p = sub.add_parser("open")

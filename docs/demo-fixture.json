@@ -1,0 +1,872 @@
+{
+ "generated_at": 1791965026,
+ "disk": {
+  "free_gb": 128.4,
+  "total_gb": 494.4
+ },
+ "totals": {
+  "count": 11,
+  "artifacts_gb": 8.6,
+  "reclaimable_gb": 2.6,
+  "sizes_complete": true
+ },
+ "worktrees": [
+  {
+   "name": "payments-api-feat-ACME-412",
+   "path": "/Users/dev/Projects/acme/worktrees/payments-api-feat-ACME-412",
+   "repo": "payments-api",
+   "branch": "feat/ACME-412-mid-cycle-proration",
+   "ticket": "ACME-412",
+   "head": "ffffffffffffffffffffffff98434304b65d0044",
+   "state": "active",
+   "reasons": [
+    "9 uncommitted file(s)",
+    "3 process(es) running",
+    "/dev run active @ verify"
+   ],
+   "remove_blockers": [
+    "9 uncommitted file(s)",
+    "3 process(es) running inside",
+    "/dev run still active (verify)"
+   ],
+   "removable": false,
+   "force_blockers": [
+    "3 process(es) running inside \u2014 stop them first",
+    "changed 0h ago \u2014 still in use"
+   ],
+   "git": {
+    "modified": 7,
+    "untracked": 2,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/feat/ACME-412-mid-cycle-proration",
+    "unpushed": 0,
+    "activity_ts": 1791964786,
+    "last_commit": {
+     "sha": "546cc0d",
+     "ts": 1791964186,
+     "subject": "feat(billing): prorate seat changes in the middle of a cycle"
+    },
+    "files": [
+     {
+      "s": "M",
+      "p": "src/billing/proration.service.ts"
+     },
+     {
+      "s": "M",
+      "p": "src/billing/proration.spec.ts"
+     },
+     {
+      "s": "??",
+      "p": "test/fixtures/mid-cycle.json"
+     }
+    ]
+   },
+   "pr": {
+    "number": 512,
+    "state": "OPEN",
+    "url": "https://github.com/acme/payments-api/pull/512",
+    "title": "feat(billing): prorate seat changes in the middle of a cycle",
+    "reviewDecision": null,
+    "baseRefName": "develop"
+   },
+   "run": {
+    "stage": "verify",
+    "status": "active",
+    "next_action": "independent verify on the rebased branch, then review",
+    "updated": "today"
+   },
+   "artifacts": {
+    "kind": "dir",
+    "kb": 1300000,
+    "items": [
+     {
+      "name": "node_modules",
+      "kind": "dir",
+      "kb": 1300000
+     }
+    ]
+   },
+   "ecosystems": [
+    "node"
+   ],
+   "procs": [
+    {
+     "pid": 51234,
+     "name": "node",
+     "cmd": "node --require ts-node/register src/main.ts",
+     "ports": [
+      "3000"
+     ],
+     "etime": "41:12",
+     "rss_kb": 612000,
+     "cpu": 38.0,
+     "child": false
+    },
+    {
+     "pid": 51240,
+     "name": "node",
+     "cmd": "jest --watch test/billing",
+     "ports": [],
+     "etime": "12:03",
+     "rss_kb": 1480000,
+     "cpu": 212.0,
+     "child": false
+    },
+    {
+     "pid": 51241,
+     "name": "node",
+     "cmd": "jest worker 1",
+     "ports": [],
+     "etime": "12:02",
+     "rss_kb": 410000,
+     "cpu": 96.0,
+     "child": true
+    }
+   ],
+   "pr_status": {
+    "state": "CONFLICTING",
+    "mergeable": "CONFLICTING",
+    "review_decision": "NONE",
+    "reviews": 2,
+    "checks": [],
+    "failed_checks": [],
+    "next": "rebase onto the base, re-run the tests, then force-push-with-lease",
+    "at": 1791964956
+   },
+   "base_sync": {
+    "base": "develop",
+    "behind": 6,
+    "ahead": 4,
+    "fetched_ts": 1791963526
+   },
+   "sessions": [
+    {
+     "pid": 40015,
+     "name": "acme-session-7f",
+     "status": "busy",
+     "session_id": "00000000-0000-0000-0000-000000000000",
+     "warp": "00000000000000000000000000000000",
+     "last_ts": 1791964846
+    }
+   ],
+   "warp": {
+    "uuid": "00000000000000000000000000000000",
+    "source": "claude",
+    "label": "acme-session-7f"
+   }
+  },
+  {
+   "name": "payments-api-fix-ACME-418",
+   "path": "/Users/dev/Projects/acme/worktrees/payments-api-fix-ACME-418",
+   "repo": "payments-api",
+   "branch": "fix/ACME-418-webhook-redelivery",
+   "ticket": "ACME-418",
+   "head": "fffffffffffffffffffffffffd3a0372e03862e2",
+   "state": "active",
+   "reasons": [
+    "3 uncommitted file(s)",
+    "/dev run active @ pr"
+   ],
+   "remove_blockers": [
+    "3 modified file(s)",
+    "/dev run still active (pr)"
+   ],
+   "removable": false,
+   "force_blockers": [
+    "changed 0h ago \u2014 still in use"
+   ],
+   "git": {
+    "modified": 3,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/fix/ACME-418-webhook-redelivery",
+    "unpushed": 0,
+    "activity_ts": 1791962626,
+    "last_commit": {
+     "sha": "8156fb9",
+     "ts": 1791962026,
+     "subject": "fix(invoices): stop double-charging on webhook redelivery"
+    },
+    "files": []
+   },
+   "pr": {
+    "number": 515,
+    "state": "OPEN",
+    "url": "https://github.com/acme/payments-api/pull/515",
+    "title": "fix(invoices): stop double-charging on webhook redelivery",
+    "reviewDecision": null,
+    "baseRefName": "develop"
+   },
+   "run": {
+    "stage": "pr",
+    "status": "active",
+    "next_action": "unit-tests red on CI \u2014 reproduce locally",
+    "updated": "today"
+   },
+   "artifacts": {
+    "kind": "dir",
+    "kb": 1300000,
+    "items": [
+     {
+      "name": "node_modules",
+      "kind": "dir",
+      "kb": 1300000
+     }
+    ]
+   },
+   "ecosystems": [
+    "node"
+   ],
+   "procs": [],
+   "pr_status": {
+    "state": "CHECKS_FAILED",
+    "mergeable": "MERGEABLE",
+    "review_decision": "NONE",
+    "reviews": 1,
+    "checks": [
+     {
+      "name": "unit-tests",
+      "bucket": "fail",
+      "link": ""
+     },
+     {
+      "name": "lint",
+      "bucket": "pass",
+      "link": ""
+     },
+     {
+      "name": "build",
+      "bucket": "pass",
+      "link": ""
+     },
+     {
+      "name": "e2e",
+      "bucket": "pending",
+      "link": ""
+     }
+    ],
+    "failed_checks": [
+     "unit-tests"
+    ],
+    "next": "reproduce the failing check locally, fix, push",
+    "at": 1791964956
+   },
+   "base_sync": {
+    "base": "develop",
+    "behind": 0,
+    "ahead": 2,
+    "fetched_ts": 1791963526
+   },
+   "sessions": [
+    {
+     "pid": 40015,
+     "name": "acme-session-c2",
+     "status": "idle",
+     "session_id": "00000000-0000-0000-0000-000000000000",
+     "warp": "00000000000000000000000000000000",
+     "last_ts": 1791962926
+    }
+   ],
+   "warp": {
+    "uuid": "11111111111111111111111111111111",
+    "source": "claude",
+    "label": "acme-session-c2"
+   }
+  },
+  {
+   "name": "core-api-feat-ACME-421",
+   "path": "/Users/dev/Projects/acme/worktrees/core-api-feat-ACME-421",
+   "repo": "core-api",
+   "branch": "feat/ACME-421-weekly-digest",
+   "ticket": "ACME-421",
+   "head": "ffffffffffffffffffffffffafd676ec82d8841b",
+   "state": "active",
+   "reasons": [
+    "5 uncommitted file(s)",
+    "/dev run active @ implement"
+   ],
+   "remove_blockers": [
+    "4 modified file(s)",
+    "1 untracked file(s)",
+    "/dev run still active (implement)"
+   ],
+   "removable": false,
+   "force_blockers": [],
+   "git": {
+    "modified": 4,
+    "untracked": 1,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/feat/ACME-421-weekly-digest",
+    "unpushed": 0,
+    "activity_ts": 1791957826,
+    "last_commit": {
+     "sha": "3518936",
+     "ts": 1791957226,
+     "subject": "feat(notifications): weekly usage digest email"
+    },
+    "files": []
+   },
+   "pr": null,
+   "run": {
+    "stage": "implement",
+    "status": "active",
+    "next_action": "template + scheduler wiring",
+    "updated": "today"
+   },
+   "artifacts": {
+    "kind": "none",
+    "kb": 0,
+    "items": []
+   },
+   "ecosystems": [
+    "go"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [
+    {
+     "pid": 40015,
+     "name": "acme-session-4b",
+     "status": "idle",
+     "session_id": "00000000-0000-0000-0000-000000000000",
+     "warp": "00000000000000000000000000000000",
+     "last_ts": 1791957826
+    }
+   ],
+   "warp": {
+    "uuid": "22222222222222222222222222222222",
+    "source": "claude",
+    "label": "acme-session-4b"
+   }
+  },
+  {
+   "name": "core-api-feat-ACME-399",
+   "path": "/Users/dev/Projects/acme/worktrees/core-api-feat-ACME-399",
+   "repo": "core-api",
+   "branch": "feat/ACME-399-cursor-pagination",
+   "ticket": "ACME-399",
+   "head": "0000000000000000000000003a7442dacc1c6c10",
+   "state": "review",
+   "reasons": [
+    "PR #1287 open \u00b7 approved"
+   ],
+   "remove_blockers": [],
+   "removable": true,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/feat/ACME-399-cursor-pagination",
+    "unpushed": 0,
+    "activity_ts": 1791878626,
+    "last_commit": {
+     "sha": "13d77ce",
+     "ts": 1791878026,
+     "subject": "feat(api): cursor pagination for /v2/invoices"
+    },
+    "files": []
+   },
+   "pr": {
+    "number": 1287,
+    "state": "OPEN",
+    "url": "https://github.com/acme/core-api/pull/1287",
+    "title": "feat(api): cursor pagination for /v2/invoices",
+    "reviewDecision": "APPROVED",
+    "baseRefName": "develop"
+   },
+   "run": null,
+   "artifacts": {
+    "kind": "none",
+    "kb": 0,
+    "items": []
+   },
+   "ecosystems": [
+    "go"
+   ],
+   "procs": [],
+   "pr_status": {
+    "state": "APPROVED",
+    "mergeable": "MERGEABLE",
+    "review_decision": "APPROVED",
+    "reviews": 2,
+    "checks": [
+     {
+      "name": "go-test",
+      "bucket": "pass",
+      "link": ""
+     },
+     {
+      "name": "golangci-lint",
+      "bucket": "pass",
+      "link": ""
+     },
+     {
+      "name": "build",
+      "bucket": "pass",
+      "link": ""
+     }
+    ],
+    "failed_checks": [],
+    "next": "waiting for a merge \u2014 nothing to do",
+    "at": 1791964956
+   },
+   "base_sync": {
+    "base": "develop",
+    "behind": 0,
+    "ahead": 1,
+    "fetched_ts": 1791963526
+   },
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "payments-api-fix-ACME-405",
+   "path": "/Users/dev/Projects/acme/worktrees/payments-api-fix-ACME-405",
+   "repo": "payments-api",
+   "branch": "fix/ACME-405-token-rotation",
+   "ticket": "ACME-405",
+   "head": "0000000000000000000000000203b697ba8a6269",
+   "state": "review",
+   "reasons": [
+    "PR #509 open"
+   ],
+   "remove_blockers": [],
+   "removable": true,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/fix/ACME-405-token-rotation",
+    "unpushed": 0,
+    "activity_ts": 1791792226,
+    "last_commit": {
+     "sha": "091d839",
+     "ts": 1791791626,
+     "subject": "fix(auth): refresh token rotation race"
+    },
+    "files": []
+   },
+   "pr": {
+    "number": 509,
+    "state": "OPEN",
+    "url": "https://github.com/acme/payments-api/pull/509",
+    "title": "fix(auth): refresh token rotation race",
+    "reviewDecision": null,
+    "baseRefName": "develop"
+   },
+   "run": null,
+   "artifacts": {
+    "kind": "dir",
+    "kb": 1300000,
+    "items": [
+     {
+      "name": "node_modules",
+      "kind": "dir",
+      "kb": 1300000
+     }
+    ]
+   },
+   "ecosystems": [
+    "node"
+   ],
+   "procs": [],
+   "pr_status": {
+    "state": "WAITING_REVIEW",
+    "mergeable": "MERGEABLE",
+    "review_decision": "NONE",
+    "reviews": 0,
+    "checks": [
+     {
+      "name": "unit-tests",
+      "bucket": "pass",
+      "link": ""
+     },
+     {
+      "name": "lint",
+      "bucket": "pass",
+      "link": ""
+     },
+     {
+      "name": "build",
+      "bucket": "pass",
+      "link": ""
+     }
+    ],
+    "failed_checks": [],
+    "next": "make sure reviewers were pinged",
+    "at": 1791964956
+   },
+   "base_sync": {
+    "base": "develop",
+    "behind": 2,
+    "ahead": 1,
+    "fetched_ts": 1791963526
+   },
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "ml-scoring-fix-ACME-366",
+   "path": "/Users/dev/Projects/acme/worktrees/ml-scoring-fix-ACME-366",
+   "repo": "ml-scoring",
+   "branch": "fix/ACME-366-pin-tokenizer",
+   "ticket": "ACME-366",
+   "head": "ffffffffffffffffffffffffa50b125862cdbf08",
+   "state": "idle",
+   "reasons": [
+    "2 uncommitted file(s)",
+    "untouched 5 days"
+   ],
+   "remove_blockers": [
+    "2 modified file(s)"
+   ],
+   "removable": false,
+   "force_blockers": [],
+   "git": {
+    "modified": 2,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/fix/ACME-366-pin-tokenizer",
+    "unpushed": 0,
+    "activity_ts": 1791533026,
+    "last_commit": {
+     "sha": "4f35f55",
+     "ts": 1791532426,
+     "subject": "fix(ml): pin tokenizer version in the scoring job"
+    },
+    "files": []
+   },
+   "pr": null,
+   "run": null,
+   "artifacts": {
+    "kind": "dir",
+    "kb": 2100000,
+    "items": [
+     {
+      "name": ".venv",
+      "kind": "dir",
+      "kb": 1900000
+     },
+     {
+      "name": ".pytest_cache",
+      "kind": "dir",
+      "kb": 200000
+     }
+    ]
+   },
+   "ecosystems": [
+    "python"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "core-api-feat-ACME-390",
+   "path": "/Users/dev/Projects/acme/worktrees/core-api-feat-ACME-390",
+   "repo": "core-api",
+   "branch": "feat/ACME-390-batch-writer",
+   "ticket": "ACME-390",
+   "head": "ffffffffffffffffffffffffcebd1cb20fb701f6",
+   "state": "stale",
+   "reasons": [
+    "untouched 19 days"
+   ],
+   "remove_blockers": [
+    "2 commit(s) on no remote branch"
+   ],
+   "removable": false,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/feat/ACME-390-batch-writer",
+    "unpushed": 2,
+    "activity_ts": 1790323426,
+    "last_commit": {
+     "sha": "d75b2c6",
+     "ts": 1790322826,
+     "subject": "feat(ingest): batch writer for usage events"
+    },
+    "files": []
+   },
+   "pr": null,
+   "run": null,
+   "artifacts": {
+    "kind": "none",
+    "kb": 0,
+    "items": []
+   },
+   "ecosystems": [
+    "go"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "infra-chore-ACME-377",
+   "path": "/Users/dev/Projects/acme/worktrees/infra-chore-ACME-377",
+   "repo": "infra",
+   "branch": "chore/ACME-377-shared-vpc",
+   "ticket": "ACME-377",
+   "head": "0000000000000000000000007cc0705aabaff0f7",
+   "state": "merged",
+   "reasons": [
+    "PR #233 merged"
+   ],
+   "remove_blockers": [],
+   "removable": true,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/chore/ACME-377-shared-vpc",
+    "unpushed": 0,
+    "activity_ts": 1791878626,
+    "last_commit": {
+     "sha": "4a2a550",
+     "ts": 1791878026,
+     "subject": "chore(infra): move queues to the shared VPC"
+    },
+    "files": []
+   },
+   "pr": {
+    "number": 233,
+    "state": "MERGED",
+    "url": "https://github.com/acme/infra/pull/233",
+    "title": "chore(infra): move queues to the shared VPC",
+    "reviewDecision": null,
+    "baseRefName": "main"
+   },
+   "run": null,
+   "artifacts": {
+    "kind": "none",
+    "kb": 0,
+    "items": []
+   },
+   "ecosystems": [
+    "terraform"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "payments-api-feat-ACME-381",
+   "path": "/Users/dev/Projects/acme/worktrees/payments-api-feat-ACME-381",
+   "repo": "payments-api",
+   "branch": "feat/ACME-381-annual-downgrade",
+   "ticket": "ACME-381",
+   "head": "ffffffffffffffffffffffffb3aa6adc620c11f9",
+   "state": "merged",
+   "reasons": [
+    "PR #498 merged"
+   ],
+   "remove_blockers": [],
+   "removable": true,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/feat/ACME-381-annual-downgrade",
+    "unpushed": 0,
+    "activity_ts": 1791792226,
+    "last_commit": {
+     "sha": "aa6391e",
+     "ts": 1791791626,
+     "subject": "feat(billing): annual plan downgrade at renewal"
+    },
+    "files": []
+   },
+   "pr": {
+    "number": 498,
+    "state": "MERGED",
+    "url": "https://github.com/acme/payments-api/pull/498",
+    "title": "feat(billing): annual plan downgrade at renewal",
+    "reviewDecision": null,
+    "baseRefName": "develop"
+   },
+   "run": null,
+   "artifacts": {
+    "kind": "dir",
+    "kb": 1300000,
+    "items": [
+     {
+      "name": "node_modules",
+      "kind": "dir",
+      "kb": 1300000
+     }
+    ]
+   },
+   "ecosystems": [
+    "node"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "payments-api-fix-ACME-372",
+   "path": "/Users/dev/Projects/acme/worktrees/payments-api-fix-ACME-372",
+   "repo": "payments-api",
+   "branch": "fix/ACME-372-archived-product-500",
+   "ticket": "ACME-372",
+   "head": "00000000000000000000000003a2f5295bd54868",
+   "state": "merged",
+   "reasons": [
+    "PR #491 merged"
+   ],
+   "remove_blockers": [],
+   "removable": true,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 0,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/fix/ACME-372-archived-product-500",
+    "unpushed": 0,
+    "activity_ts": 1791705826,
+    "last_commit": {
+     "sha": "6bc9790",
+     "ts": 1791705226,
+     "subject": "fix(api): 500 on deleting an archived product"
+    },
+    "files": []
+   },
+   "pr": {
+    "number": 491,
+    "state": "MERGED",
+    "url": "https://github.com/acme/payments-api/pull/491",
+    "title": "fix(api): 500 on deleting an archived product",
+    "reviewDecision": null,
+    "baseRefName": "develop"
+   },
+   "run": null,
+   "artifacts": {
+    "kind": "dir",
+    "kb": 1300000,
+    "items": [
+     {
+      "name": "node_modules",
+      "kind": "dir",
+      "kb": 1300000
+     }
+    ]
+   },
+   "ecosystems": [
+    "node"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [],
+   "warp": null
+  },
+  {
+   "name": "core-api-feat-ACME-358",
+   "path": "/Users/dev/Projects/acme/worktrees/core-api-feat-ACME-358",
+   "repo": "core-api",
+   "branch": "feat/ACME-358-finance-csv",
+   "ticket": "ACME-358",
+   "head": "00000000000000000000000077711c2518381b67",
+   "state": "merged",
+   "reasons": [
+    "1 uncommitted file(s)",
+    "untouched 6 days"
+   ],
+   "remove_blockers": [
+    "1 untracked file(s)"
+   ],
+   "removable": false,
+   "force_blockers": [],
+   "git": {
+    "modified": 0,
+    "untracked": 1,
+    "ahead": 0,
+    "behind": 0,
+    "upstream": "origin/feat/ACME-358-finance-csv",
+    "unpushed": 0,
+    "activity_ts": 1791446626,
+    "last_commit": {
+     "sha": "c93e78d",
+     "ts": 1791446026,
+     "subject": "feat(reports): CSV export for finance"
+    },
+    "files": [
+     {
+      "s": "??",
+      "p": "scratch/export-sample.csv"
+     }
+    ]
+   },
+   "pr": {
+    "number": 1263,
+    "state": "MERGED",
+    "url": "https://github.com/acme/core-api/pull/1263",
+    "title": "feat(reports): CSV export for finance",
+    "reviewDecision": null,
+    "baseRefName": "develop"
+   },
+   "run": null,
+   "artifacts": {
+    "kind": "none",
+    "kb": 0,
+    "items": []
+   },
+   "ecosystems": [
+    "go"
+   ],
+   "procs": [],
+   "pr_status": null,
+   "base_sync": null,
+   "sessions": [],
+   "warp": null
+  }
+ ],
+ "config": {
+  "jira_url": "https://acme.atlassian.net",
+  "repos": {
+   "payments-api": {
+    "label": "payments",
+    "hue": 250
+   },
+   "core-api": {
+    "label": "core",
+    "hue": 190
+   },
+   "infra": {
+    "label": "infra",
+    "hue": 75
+   },
+   "ml-scoring": {
+    "label": "ml",
+    "hue": 300
+   }
+  }
+ }
+}
