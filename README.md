@@ -79,7 +79,7 @@ IDEs, Zed, Sublime Text or Xcode.
   such as a committed Go `vendor/`, is never touched.
 - **Multi-select.** ⌘-click or ⇧-click several worktrees, then press ⌫.
 - **Force remove.** Saves `changes.patch` (tracked changes) and a copy of every untracked file
-  to `.wt-backups/`, with restore steps. It is refused for anything changed in the last 24
+  to `~/Library/Application Support/git-worktree-tracker/backups/`, with restore steps. It is refused for anything changed in the last 24
   hours or with processes still running.
 - **Branches.** Local branches are kept. *Also delete local branches* removes only branches
   git agrees are merged.
@@ -88,8 +88,24 @@ IDEs, Zed, Sublime Text or Xcode.
 
 ## Install
 
-Requires macOS 14 or later, the Xcode command line tools (`xcode-select --install`), Python 3,
-and optionally the [GitHub CLI](https://cli.github.com) for PR status.
+Requires macOS 14 or later (Apple Silicon or Intel) and the Xcode Command Line Tools, which
+provide git and Python 3 (`xcode-select --install`). The [GitHub CLI](https://cli.github.com)
+is optional and enables PR status.
+
+**Homebrew**
+
+```bash
+brew install --cask duynguyentho/tap/git-worktree-tracker
+```
+
+**One-line installer.** It downloads the latest release, verifies its checksum and installs
+into `~/Applications`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/duynguyentho/git-worktree-tracker/main/install.sh | sh
+```
+
+**From source**
 
 ```bash
 git clone https://github.com/duynguyentho/git-worktree-tracker
@@ -98,8 +114,14 @@ app/build.sh            # builds with swiftc, installs ~/Applications/Worktrees.
 app/build.sh --login    # also adds it to Login Items
 ```
 
-Without Xcode, the app is built with `swiftc` and ad-hoc signed. The first launch may ask for
-access to your Documents folder.
+On first launch the app proposes the code folders it found (`~/Projects`, `~/Developer`,
+`~/code`, …), or you can pick your own. Repos up to three levels deep are found, and their
+worktrees are discovered wherever they live. You can change the folders later from the
+sidebar.
+
+> The app is ad-hoc signed but **not notarized**. The Homebrew cask and the installer clear
+> the quarantine flag for you. If you download the zip by hand, right-click → **Open** the
+> first time, or run `xattr -dr com.apple.quarantine Worktrees.app`.
 
 ## Configuration
 
@@ -108,7 +130,8 @@ Every setting is optional and lives outside the repo, in
 
 ```json
 {
-  "base": "~/Projects/acme",
+  "bases": ["~/Projects", "~/work/acme"],
+  "scan_depth": 3,
   "jira_url": "https://acme.atlassian.net",
   "ticket_regex": "\\bACME-\\d+\\b",
   "repos": { "payments-api": { "label": "payments", "hue": 250 } },
@@ -119,7 +142,8 @@ Every setting is optional and lives outside the repo, in
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `base` | `~/Projects` | Folder holding your repos. Worktrees are discovered through each repo's `git worktree list`, wherever they live |
+| `bases` | common code folders that exist | Folders scanned for repos. Set from the app's welcome sheet or **Change folders…**. Worktrees are discovered through each repo's `git worktree list`, wherever they live |
+| `scan_depth` | `3` | How many folder levels below each base are searched for repos |
 | `jira_url` | — | Shows the Jira buttons for ticket keys |
 | `ticket_regex` | `\b[A-Z][A-Z0-9]+-\d+\b` | How a ticket key is read from a branch or folder name |
 | `repos` | name + derived colour | Short label and OKLCH hue per repo |
@@ -127,7 +151,13 @@ Every setting is optional and lives outside the repo, in
 | `assistant` | — | Optional companion project that provides `/dev` run state (`.claude/memory/dev-runs.json`) and `scripts/pr_watch.py` for PR/CI status. Without it, those panels are hidden |
 
 Environment variables override the file: `WT_BASE`, `WT_ASSISTANT`, `WT_DEV_RUNS`,
-`WT_PR_WATCH_DIR`, `WT_CACHE_PATH` (default `data/wt_cache.json`), `WT_CONFIG`, `GH_BIN`.
+`WT_PR_WATCH_DIR`, `WT_CACHE_PATH`, `WT_BACKUPS`, `WT_CONFIG`, `GH_BIN`.
+
+| Data | Location |
+|------|----------|
+| Settings | `~/.config/git-worktree-tracker/config.json` |
+| Cache (PR states, sizes) | `~/Library/Caches/git-worktree-tracker/` |
+| Force-remove backups | `~/Library/Application Support/git-worktree-tracker/backups/` |
 
 ## Keyboard
 
@@ -160,7 +190,9 @@ python3 scripts/wt.py fetch <name|KEY>               # git fetch origin <PR base
 | Path | What |
 |------|------|
 | `app/WorktreeBar.swift` | The SwiftUI app: main window, menu bar extra, `libproc` sampler |
-| `app/build.sh` | Builds `Worktrees.app` with `swiftc` and installs it |
+| `app/build.sh` | Builds `Worktrees.app` with `swiftc`. `--release` builds a universal, self-contained zip |
+| `install.sh` | One-line installer from the latest GitHub release |
+| `.github/workflows/release.yml` | Pushing a `v*` tag builds the universal app and publishes it to GitHub Releases |
 | `scripts/wt.py` | Backend and CLI. Every read and every removal goes through it |
 | `docs/demo-fixture.json` | Anonymised demo data used for the screenshots |
 

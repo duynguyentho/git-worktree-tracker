@@ -7,7 +7,7 @@
     python3 scripts/wt.py remove <name|KEY> [--yes]
     python3 scripts/wt.py prune [--yes]
 
-Sources: `git worktree list` of every repo under WT_BASE, `gh pr list` (cached),
+Sources: `git worktree list` of every repo found under the configured folders, `gh pr list` (cached),
 `.claude/memory/dev-runs.json`, `lsof` (processes whose cwd is inside a worktree).
 Removal is `git worktree remove` without --force, and only when nothing can be lost.
 """
@@ -39,8 +39,25 @@ def load_config():
 
 
 CONFIG = load_config()
-BASE = Path(os.environ.get("WT_BASE") or CONFIG.get("base") or "~/Projects").expanduser()
-CACHE_PATH = Path(os.environ.get("WT_CACHE_PATH", PROJECT / "data" / "wt_cache.json"))
+# Folders scanned for repos. Unconfigured → whichever common code folders exist (never ~/Documents,
+# which would trigger a macOS privacy prompt before the user picked anything).
+DEFAULT_CANDIDATES = ["~/Projects", "~/Developer", "~/code", "~/Code", "~/src", "~/dev", "~/work",
+                      "~/repos", "~/git", "~/GitHub", "~/workspace"]
+_configured = os.environ.get("WT_BASE") or CONFIG.get("bases") or CONFIG.get("base")
+CONFIGURED = bool(_configured)
+if os.environ.get("WT_BASE"):
+    BASES = [os.environ["WT_BASE"]]
+elif CONFIG.get("bases"):
+    BASES = list(CONFIG["bases"])
+elif CONFIG.get("base"):
+    BASES = [CONFIG["base"]]
+else:
+    BASES = [c for c in DEFAULT_CANDIDATES if Path(c).expanduser().is_dir()]
+BASES = list(dict.fromkeys(str(Path(b).expanduser()) for b in BASES))
+SCAN_DEPTH = int(CONFIG.get("scan_depth", 3))
+SCAN_SKIP = {"node_modules", "vendor", "worktrees", "Library", "Applications", ".Trash", "target", "dist", "build"}
+STATE_HOME = Path("~/Library/Application Support/git-worktree-tracker").expanduser()
+CACHE_PATH = Path(os.environ.get("WT_CACHE_PATH") or "~/Library/Caches/git-worktree-tracker/wt_cache.json").expanduser()
 ASSISTANT = os.environ.get("WT_ASSISTANT") or CONFIG.get("assistant")
 ASSISTANT = Path(ASSISTANT).expanduser() if ASSISTANT else None
 DEV_RUNS = os.environ.get("WT_DEV_RUNS") or (ASSISTANT and ASSISTANT / ".claude" / "memory" / "dev-runs.json")
@@ -92,9 +109,30 @@ def save_cache(cache):
 # ---------------------------------------------------------------- discovery
 
 def main_repos():
-    if not BASE.is_dir():
-        return []
-    return sorted(p for p in BASE.iterdir() if (p / ".git").is_dir())
+    """Main checkouts (a `.git` DIRECTORY — linked worktrees have a `.git` file) under every
+    configured folder, up to SCAN_DEPTH levels deep. A repo's own subfolders are not searched."""
+    found = []
+
+    def walk(d, depth):
+        try:
+            entries = sorted(e for e in d.iterdir() if e.is_dir() and not e.is_symlink())
+        except OSError:
+            return
+        for e in entries:
+            if e.name.startswith(".") or e.name in SCAN_SKIP:
+                continue
+            if (e / ".git").is_dir():
+                found.append(e)
+            elif depth > 1:
+                walk(e, depth - 1)
+
+    for base in BASES:
+        b = Path(base)
+        if (b / ".git").is_dir():
+            found.append(b)
+        elif b.is_dir():
+            walk(b, SCAN_DEPTH)
+    return list(dict.fromkeys(found))
 
 
 def repo_slug(repo):
@@ -707,7 +745,8 @@ def collect(sizes=False, refresh=False, offline=False, fresh_untracked=False, on
                      if w["removable"] and w["state"] in PRUNABLE)
     return {
         "generated_at": int(now),
-        "base": str(BASE),
+        "bases": BASES,
+        "configured": CONFIGURED,
         "disk": {"free_gb": round(du.free / 1e9, 1), "total_gb": round(du.total / 1e9, 1)},
         "totals": {
             "count": len(out),
@@ -746,10 +785,15 @@ def confirm(prompt, yes):
         return False
 
 
-TRASH = BASE / ".wt-trash"
+def trash_for(path):
+    """Next to the worktree, so moving into it is a same-volume rename (instant)."""
+    return Path(path).parent / ".wt-trash"
 
 
-BACKUPS = BASE / ".wt-backups"
+_USED_TRASH = set()
+
+
+BACKUPS = Path(os.environ.get("WT_BACKUPS") or STATE_HOME / "backups").expanduser()
 BACKUP_MAX_BYTES = 1 << 30
 
 
@@ -805,8 +849,10 @@ def do_remove(w, force=False):
         d = Path(w["path"]) / name
         if d.is_symlink():
             continue
-        TRASH.mkdir(exist_ok=True)
-        dest = TRASH / ("%s-%s-%d" % (w["name"], name.strip("."), time.time() * 1000))
+        trash = trash_for(w["path"])
+        trash.mkdir(exist_ok=True)
+        _USED_TRASH.add(trash)
+        dest = trash / ("%s-%s-%d" % (w["name"], name.strip("."), time.time() * 1000))
         try:
             os.rename(d, dest)
             parked.append((d, dest))
@@ -834,9 +880,7 @@ def delete_branch(w):
 
 
 def purge_trash():
-    if not TRASH.is_dir():
-        return
-    entries = [str(p) for p in TRASH.iterdir()]
+    entries = [str(p) for t in _USED_TRASH if t.is_dir() for p in t.iterdir()]
     if entries:
         subprocess.Popen(["nice", "-n", "15", "rm", "-rf", *entries], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -881,6 +925,8 @@ def main():
     p.add_argument("--with-sessions", action="store_true", help="also Claude sessions + Warp tab per worktree")
     p = sub.add_parser("fetch", help="git fetch origin <PR base> for a worktree (updates behind/ahead)")
     p.add_argument("target")
+    p = sub.add_parser("config", help="show or change ~/.config/git-worktree-tracker/config.json")
+    p.add_argument("--set-bases", nargs="+", metavar="DIR", help="folders to scan for repos")
     p = sub.add_parser("kill")
     p.add_argument("target")
     p.add_argument("--yes", action="store_true")
@@ -888,13 +934,26 @@ def main():
     p.add_argument("targets", nargs="+")
     p.add_argument("--force", action="store_true",
                    help="also remove worktrees with uncommitted/untracked files or an active /dev run — "
-                        "their changes are backed up to WT_BASE/.wt-backups first")
+                        "their changes are backed up to ~/Library/Application Support/git-worktree-tracker/backups first")
     p.add_argument("--delete-branch", action="store_true",
                    help="also delete the local branch: -D only when its tip is exactly the merged PR head, else -d")
     p.add_argument("--yes", action="store_true")
     p = sub.add_parser("prune")
     p.add_argument("--yes", action="store_true")
     a = ap.parse_args()
+
+    if a.cmd == "config":
+        if a.set_bases:
+            cfg = load_config()
+            cfg["bases"] = [str(Path(b).expanduser()) for b in a.set_bases]
+            cfg.pop("base", None)
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = CONFIG_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+            os.replace(tmp, CONFIG_PATH)
+        print(json.dumps({"path": str(CONFIG_PATH), "config": load_config(), "bases": BASES if not a.set_bases else
+                          cfg["bases"], "configured": CONFIGURED or bool(a.set_bases)}, indent=2))
+        return
 
     if a.cmd == "procs":
         paths = [p for p in (a.paths or [i["worktree"] for r in main_repos() for i in list_worktrees(r)]) if Path(p).is_dir()]

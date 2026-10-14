@@ -11,6 +11,8 @@ struct Payload: Decodable {
     let totals: Totals
     var worktrees: [Worktree]
     let config: AppConfig?
+    let bases: [String]?
+    let configured: Bool?
 }
 
 /// Local, uncommitted settings from ~/.config/git-worktree-tracker/config.json (passed through by wt.py).
@@ -573,8 +575,10 @@ final class Store: ObservableObject {
     static let historyLength = 120
 
     init() {
-        script = Bundle.main.object(forInfoDictionaryKey: "WTScriptPath") as? String
-            ?? NSString("~/Projects/claude-assistant/scripts/wt.py").expandingTildeInPath
+        // A dev build points at the checkout (live edits); a release build runs the bundled copy.
+        let dev = Bundle.main.object(forInfoDictionaryKey: "WTScriptPath") as? String
+        script = dev.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+            ?? Bundle.main.path(forResource: "wt", ofType: "py") ?? ""
         refresh(withSizes: true)
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh(withSizes: true) }
@@ -794,7 +798,7 @@ final class Store: ObservableObject {
         return Alerts.confirm(forced.count == 1 ? "Force remove \(forced[0].title)?" : "Force remove \(forced.count) worktrees?",
                               "\(list)\n\nTheir uncommitted and untracked files are deleted from the worktree. "
                               + "A backup (changes.patch + untracked files + restore steps) is saved first to "
-                              + ".wt-backups/ in the repos folder. Local branches are kept.",
+                              + "~/Library/Application Support/git-worktree-tracker/backups. Local branches are kept.",
                               button: "Force Remove")
     }
 
@@ -809,6 +813,33 @@ final class Store: ObservableObject {
         }
         if confirmForce(forced) {
             removeConfirmed(ws.filter(\.removable) + forced, deleteBranches: false, force: true)
+        }
+    }
+
+    /// NSOpenPanel → `wt.py config --set-bases …` → rescan.
+    func chooseFolders() {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.title = "Folders that hold your git repos"
+        panel.message = "Repos up to 3 levels deep are found; their worktrees are discovered wherever they live."
+        panel.prompt = "Use Folders"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        setBases(panel.urls.map(\.path))
+    }
+
+    func setBases(_ paths: [String]) {
+        busy = "Scanning…"
+        Task {
+            let (code, _, err) = await Shell.run("/usr/bin/python3", [script, "config", "--set-bases"] + paths)
+            busy = nil
+            if code != 0 { Alerts.info("Could not save the folders", err) }
+            data = nil
+            loading = false
+            refresh(withSizes: true)
         }
     }
 
@@ -1043,6 +1074,8 @@ struct MainView: View {
     @State private var query = ""
     @State private var showSidebar = true
     @State private var showCleanup = false
+    @State private var showWelcome = false
+    @State private var welcomed = false
     @FocusState private var searchFocused: Bool
     @FocusState private var listFocused: Bool
 
@@ -1113,9 +1146,14 @@ struct MainView: View {
         .font(F.ui(13))
         .foregroundStyle(T.fg)
         .sheet(isPresented: $showCleanup) { CleanupSheet().environmentObject(store) }
+        .sheet(isPresented: $showWelcome) { WelcomeSheet().environmentObject(store) }
         .onAppear { DispatchQueue.main.async { listFocused = true } }
         .background(shortcuts)
         .onChange(of: store.data?.generated_at) {
+            if !welcomed, store.data?.configured == false, Store.fixture == nil, Snapshot.path == nil || Snapshot.args.contains("--welcome") {
+                welcomed = true
+                showWelcome = true
+            }
             selection = selection.intersection(Set(store.worktrees.map(\.path)))
             if selection.isEmpty, let ids = Snapshot.select {
                 selection = Set(ids.split(separator: ",").compactMap { id in
@@ -1253,7 +1291,12 @@ struct MainView: View {
             } else if groups.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").font(.system(size: 26)).foregroundStyle(T.faint)
-                    Text(query.isEmpty ? "Nothing here" : "No match for “\(query)”").font(F.ui(14, .semibold))
+                    Text(query.isEmpty ? "No worktrees found" : "No match for “\(query)”").font(F.ui(14, .semibold))
+                    if query.isEmpty {
+                        Text("Scanning " + (store.data?.bases ?? []).map(tildePath).joined(separator: ", "))
+                            .font(F.ui(12)).foregroundStyle(T.muted).multilineTextAlignment(.center)
+                        Button("Choose folders…") { store.chooseFolders() }.buttonStyle(TButtonStyle(height: 30))
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -1444,6 +1487,22 @@ struct SidebarView: View {
                     NavRow(dot: RepoStyle.of(repo).dot, label: repo, count: n,
                            on: filter == .repo(repo)) { filter = filter == .repo(repo) ? .all : .repo(repo) }
                 }
+            }
+            nav("Folders") {
+                ForEach(store.data?.bases ?? [], id: \.self) { b in
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder").font(.system(size: 12, weight: .semibold)).foregroundStyle(T.muted).frame(width: 16)
+                        Text(tildePath(b)).font(F.ui(12.5)).foregroundStyle(T.muted).lineLimit(1).truncationMode(.head)
+                    }
+                    .padding(.horizontal, 10).frame(height: 26)
+                    .help(b)
+                }
+                Button { store.chooseFolders() } label: {
+                    Label("Change folders…", systemImage: "folder.badge.gearshape").font(F.ui(12.5, .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(T.accentText)
+                .padding(.horizontal, 10).frame(height: 26)
             }
             Spacer(minLength: 0)
             if !store.running.isEmpty { ResourcesCard { filter = .running } }
@@ -2068,7 +2127,7 @@ struct DetailView: View {
                         .buttonStyle(TButtonStyle(kind: .danger, height: 34))
                         .labelStyle(GapLabel())
                         .disabled(store.busy != nil)
-                        .help("Backs up changes.patch + untracked files to .wt-backups in the repos folder, then removes")
+                        .help("Backs up changes.patch + untracked files to ~/Library/Application Support/git-worktree-tracker/backups, then removes")
                 } else {
                     Button { store.remove(w) } label: { Label("Remove worktree", systemImage: "trash") }
                         .buttonStyle(TButtonStyle(kind: .danger, height: 34))
@@ -2096,7 +2155,7 @@ struct DetailView: View {
         }
         let rest = w.remove_blockers.count > 1 ? w.remove_blockers.joined(separator: " · ") + ". " : ""
         if w.forceRemovable {
-            return rest + "Commit or discard them — or force remove: the changes are backed up to .wt-backups first."
+            return rest + "Commit or discard them — or force remove: the changes are backed up first."
         }
         return rest + "Can't be forced: " + (w.force_blockers ?? []).joined(separator: " · ") + "."
     }
@@ -2241,6 +2300,70 @@ struct MultiSelectView: View {
             Spacer()
             Text(sizeText(w.artifacts)).font(F.ui(12)).monospacedDigit().foregroundStyle(T.subtle)
         }
+    }
+}
+
+// MARK: - Welcome (first launch)
+
+func tildePath(_ p: String) -> String { p.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
+
+struct WelcomeSheet: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let bases = store.data?.bases ?? []
+        let repos = Set(store.worktrees.map(\.repo)).count
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(T.accentText)
+                    .frame(width: 48, height: 48)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(T.accentSoft))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Welcome to Worktrees").font(F.ui(20, .bold)).tracking(-0.2)
+                    Text("Pick the folders that hold your git repos. Repos up to 3 levels deep are found, and their worktrees are discovered wherever they live. Nothing is changed until you remove something.")
+                        .font(F.ui(13)).foregroundStyle(T.muted).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(bases.isEmpty ? "No common code folder found" : "Found automatically")
+                    .font(F.ui(11.5, .semibold)).foregroundStyle(T.subtle)
+                ForEach(bases, id: \.self) { b in
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder.fill").foregroundStyle(T.accentText)
+                        Text(tildePath(b)).font(F.mono(12.5))
+                    }
+                }
+                if !bases.isEmpty {
+                    Text(store.worktrees.isEmpty
+                         ? "No linked worktrees there yet — choose the folders your repos live in."
+                         : "\(plural(store.worktrees.count, "worktree")) in \(plural(repos, "repo")) so far")
+                        .font(F.ui(12)).foregroundStyle(T.muted)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(T.section))
+            HStack(spacing: 10) {
+                Spacer()
+                if !bases.isEmpty {
+                    Button("Use these") { store.setBases(bases); dismiss() }
+                        .buttonStyle(TButtonStyle())
+                }
+                Button { dismiss(); DispatchQueue.main.async { store.chooseFolders() } } label: {
+                    Label("Choose folders…", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(TButtonStyle(kind: .primary))
+                .labelStyle(GapLabel())
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
+        .background(T.sheet)
+        .font(F.ui(13))
+        .foregroundStyle(T.fg)
     }
 }
 
