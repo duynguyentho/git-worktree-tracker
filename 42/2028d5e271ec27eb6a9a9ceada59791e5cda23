@@ -1,0 +1,27 @@
+.gitignore
+  s_6d223886611d13::t_d0b085e7d05e8b 1-5
+app/WorktreeBar.swift
+  s_6d223886611d13::t_befd9bffb3014e 1-2461
+app/build.sh
+  s_6d223886611d13::t_c87d5a9f6879d5 1-48
+scripts/wt.py
+  s_6d223886611d13::t_445d5582ecc913 1-919
+README.md
+  s_6d223886611d13::t_f8067f7f7a29a0 1-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "422028d5e271ec27eb6a9a9ceada59791e5cda23",
+  "prompts": {},
+  "sessions": {
+    "s_6d223886611d13": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a3d1f83b-5668-4bd7-8cd5-7ae2b8e37bc2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "duynguyentho <duynt2201@gmail.com>"
+    }
+  }
+}
