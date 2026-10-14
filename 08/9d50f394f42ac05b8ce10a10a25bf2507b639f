@@ -1,0 +1,109 @@
+README.md
+  s_6d223886611d13::t_551b327da289d8 44-45,258-295,308
+app/Sources/App/Snapshot.swift
+  s_6d223886611d13::t_822d9d436a342e 1-35
+app/Sources/App/WorktreesApp.swift
+  s_6d223886611d13::t_a2d61d8877cdec 1-62
+app/Sources/Models/Payload.swift
+  s_6d223886611d13::t_6454b33d450a9a 1-87
+app/Sources/Models/Worktree.swift
+  s_6d223886611d13::t_b0177fdf71f24e 1-135
+app/Sources/Services/LiveSampler.swift
+  s_6d223886611d13::t_7142cfcb317a11 1-105
+app/Sources/Services/Notifier.swift
+  s_6d223886611d13::t_7167c7f7591842 1-40
+app/Sources/Services/Shell.swift
+  s_6d223886611d13::t_a439b145c466a1 1-80
+app/Sources/Services/SystemSampler.swift
+  s_6d223886611d13::t_6ccf027c918305 1-77
+app/Sources/Store/Store.swift
+  s_6d223886611d13::t_c1abbe4d3b59db 1-466
+app/Sources/Support/Formatting.swift
+  s_6d223886611d13::t_0ec7e36da1c385 1-54
+app/Sources/Support/InstalledApps.swift
+  s_6d223886611d13::t_30529ca7f5f1d0 1-24
+app/Sources/Theme/Styles.swift
+  s_6d223886611d13::t_da2e580c4a4044 1-66
+app/Sources/Theme/Theme.swift
+  s_6d223886611d13::t_4140c3e3c927d8 1-83
+app/Sources/Views/Components/Charts.swift
+  s_6d223886611d13::t_2681ac12d1f25e 1-95
+app/Sources/Views/Components/Controls.swift
+  s_6d223886611d13::t_42f7d115601186 1-178
+app/Sources/Views/Detail/DetailView.swift
+  s_6d223886611d13::t_1de78301718d2b 350-356
+app/Sources/Views/Detail/MultiSelectView.swift
+  s_6d223886611d13::t_90153e929b6ad9 1-92
+app/Sources/Views/List/WorktreeRow.swift
+  s_6d223886611d13::t_68b4864c8d62e2 1-111
+app/Sources/Views/MainView.swift
+  s_6d223886611d13::t_f397452078b256 1-420
+app/Sources/Views/MenuBarView.swift
+  s_6d223886611d13::t_edee72efdd2579 1-56
+app/Sources/Views/Sheets/CleanupSheet.swift
+  s_6d223886611d13::t_2a7756a94f4fac 1-146
+app/Sources/Views/Sheets/NewWorktreeSheet.swift
+  s_6d223886611d13::t_801dd7de806f1c 1-162
+app/Sources/Views/Sheets/WelcomeSheet.swift
+  s_6d223886611d13::t_a205af90568874 1-62
+app/Sources/Views/Sidebar/RunningCard.swift
+  s_6d223886611d13::t_561504422074d0 1-45
+app/Sources/Views/Sidebar/SidebarView.swift
+  s_6d223886611d13::t_749b5448500014 1-177
+app/Sources/Views/Sidebar/ThisMacCard.swift
+  s_6d223886611d13::t_f34379259cf2ff 1-100
+app/Sources/Views/Sidebar/WorklogCard.swift
+  s_6d223886611d13::t_785f6813137e62 1-123
+app/build.sh
+  s_6d223886611d13::t_e53eca30d99a59 29-30,35,42,47
+docs/demo-fixture.json
+  s_6d223886611d13::t_24819f3306cb94 871-932
+scripts/wt.py
+  s_6d223886611d13::t_53148fae53e059 2,17,19,22
+scripts/wtlib/__init__.py
+  s_6d223886611d13::t_23181f97b4e185 1
+scripts/wtlib/artifacts.py
+  s_6d223886611d13::t_26db731897e2e7 1-71
+scripts/wtlib/cleanup.py
+  s_6d223886611d13::t_4362985b3d7ff5 1-107
+scripts/wtlib/cli.py
+  s_6d223886611d13::t_385b0cad37b79b 1-241
+scripts/wtlib/config.py
+  s_6d223886611d13::t_1d6226454183c2 1-163
+scripts/wtlib/create.py
+  s_6d223886611d13::t_0eeecce23442e1 1-62
+scripts/wtlib/gitstate.py
+  s_6d223886611d13::t_5831c06e67c704 1-58
+scripts/wtlib/model.py
+  s_6d223886611d13::t_a6191087e201d2 1-200
+scripts/wtlib/processes.py
+  s_6d223886611d13::t_21dcb54d633e7a 1-63
+scripts/wtlib/prs.py
+  s_6d223886611d13::t_8a0cc82a4c930f 1-88
+scripts/wtlib/repos.py
+  s_6d223886611d13::t_6a4084219750b7 1-155
+scripts/wtlib/runs.py
+  s_6d223886611d13::t_4982308fe63888 1-18
+scripts/wtlib/sessions.py
+  s_6d223886611d13::t_a0a75d69051d67 1-129
+scripts/wtlib/util.py
+  s_6d223886611d13::t_8c3bf7a90ee82f 1-44
+scripts/wtlib/worklog.py
+  s_6d223886611d13::t_5964b2a4e361fe 1-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "089d50f394f42ac05b8ce10a10a25bf2507b639f",
+  "prompts": {},
+  "sessions": {
+    "s_6d223886611d13": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a3d1f83b-5668-4bd7-8cd5-7ae2b8e37bc2",
+        "model": "unknown"
+      },
+      "human_author": "duynguyentho <duynt2201@gmail.com>"
+    }
+  }
+}
