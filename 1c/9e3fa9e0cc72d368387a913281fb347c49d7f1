@@ -1,0 +1,29 @@
+app/build.sh
+  s_6d223886611d13::t_98c69faace2a61 2-8,16-25,28,30-44,52,56-57,59,61,66,69-79,87
+.github/workflows/release.yml
+  s_6d223886611d13::t_279926abdbc2eb 1-33
+README.md
+  s_6d223886611d13::t_e1c736b93b4d6b 82,91-108,117-124,133-134,145-146,154-160,193-195
+app/WorktreeBar.swift
+  s_6d223886611d13::t_fbe3fd82cf0957 14-15,578-581,801,819-845,1077-1078,1149,1153-1156,1294-1299,1491-1506,2130,2158,2306-2369
+install.sh
+  s_6d223886611d13::t_95f6ee05af750f 1-43
+scripts/wt.py
+  s_6d223886611d13::t_5370275b0dda62 10,42-60,112-135,748-749,788-790,793-796,852-855,883,928-929,937,945-957
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1c9e3fa9e0cc72d368387a913281fb347c49d7f1",
+  "prompts": {},
+  "sessions": {
+    "s_6d223886611d13": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a3d1f83b-5668-4bd7-8cd5-7ae2b8e37bc2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "duynguyentho <duynt2201@gmail.com>"
+    }
+  }
+}
